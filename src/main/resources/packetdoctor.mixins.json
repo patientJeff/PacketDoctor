@@ -1,0 +1,21 @@
+{
+	"required": true,
+	"package": "com.packetdoctor.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"ConnectionMixin",
+		"MinecraftServerMixin",
+		"PacketDecoderMixin",
+		"PacketEncoderMixin",
+		"ServerCommonPacketListenerImplMixin",
+		"ServerLoginPacketListenerImplMixin"
+	],
+	"client": [
+		"ClientCommonPacketListenerImplMixin",
+		"DisconnectedScreenMixin",
+		"MinecraftMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
