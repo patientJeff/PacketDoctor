@@ -1,0 +1,132 @@
+plugins {
+	// Minecraft 26.x ships unobfuscated, so no mappings are needed: sources use
+	// Mojang's official names directly.
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	maven {
+		name = "TerraformersMC"
+		url = "https://maven.terraformersmc.com/releases/"
+		content {
+			includeGroup "com.terraformersmc"
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	// Optional: only the "Configure" button in Mod Menu. Not needed at runtime.
+	compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+	localRuntime "com.terraformersmc:modmenu:${project.modmenu_version}"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	from("LICENSE") {
+		rename { "${it}_${project.base.archivesName.get()}" }
+	}
+}
+
+loom {
+	runs {
+		// Separate folder so a dev server and dev client can run side by side.
+		server {
+			runDir "run-server"
+		}
+		// Dev helper: ./gradlew runClient -PquickPlay=localhost joins that server on launch.
+		client {
+			if (project.hasProperty("quickPlay")) programArgs "--quickPlayMultiplayer", project.property("quickPlay").toString()
+		}
+	}
+}
+
+// Fails the build when the code uses a translation key that en_us.json doesn't have,
+// so no explanation ever shows a raw key. Explanations are "<base>.headline/.summary/.note";
+// warnings are "<ns><id>.title/.detail/.advice", in the player's wording (warn) and, for
+// checks that also run on servers, the admins' wording (swarn).
+tasks.register("checkTranslations") {
+	group = "verification"
+	description = "Checks that every translation key used in the code exists in en_us.json."
+	def langFile = file("src/main/resources/assets/packetdoctor/lang/en_us.json")
+	def sources = fileTree("src/main/java") { include "**/*.java" }
+	inputs.file(langFile)
+	inputs.files(sources)
+	doLast {
+		def lang = new groovy.json.JsonSlurper().parse(langFile, "UTF-8") as Map<String, String>
+		def missing = new TreeSet<String>()
+		def need = { String key, String where -> if (!lang.containsKey(key)) missing << "${key}  (${where})" }
+
+		sources.each { File f ->
+			def text = f.getText("UTF-8")
+			def where = f.name
+
+			(text =~ /"(packetdoctor\.[A-Za-z0-9_.]+)"/).each { all, key ->
+				if (key.endsWith(".") || key.endsWith(".json")) return
+				if (lang.containsKey(key)) return
+				if (["headline", "summary", "note"].every { lang.containsKey("${key}.${it}".toString()) }) return
+				missing << "${key}  (${where})"
+			}
+
+			// Warnings. "s.w(" is a check shared by both sides (or a server-only one), so it
+			// needs both wordings; "m.w(" and a bare "w(" are the player's side only.
+			(text =~ /(?<![\w.])(?:(\w+)\.)?w\("([a-z0-9_.]+)"/).each { all, sink, id ->
+				def parts = id == "out.rate.limit" ? ["title", "detail"] : ["title", "detail", "advice"]
+				def namespaces = sink == "s" ? ["warn", "swarn"] : ["warn"]
+				namespaces.each { ns -> parts.each { need("packetdoctor.${ns}.${id}.${it}", where) } }
+			}
+			(text =~ /Warning\.(of|server)\("([a-z0-9_.]+)"/).each { all, kind, id ->
+				(kind == "server" ? ["warn", "swarn"] : ["warn"]).each { ns ->
+					["title", "detail", "advice"].each { need("packetdoctor.${ns}.${id}.${it}", where) }
+				}
+			}
+			(text =~ /new OutLimit\("([a-z0-9_]+)"/).each { all, path ->
+				["warn", "swarn"].each { ns -> need("packetdoctor.${ns}.limit.${path}", where) }
+			}
+		}
+
+		lang.each { key, value ->
+			if (key.startsWith("packetdoctor.settings.") && !key.endsWith(".desc") && !(key in ["packetdoctor.settings.hint", "packetdoctor.settings.folder"])) {
+				need("${key}.desc", "setting description")
+			}
+			// Only %s, %1$s and %% are understood; anything else shows up broken.
+			def stripped = value.replaceAll(/%(\d+\$)?s|%%/, "")
+			if (stripped.contains("%")) missing << "${key}  (bad % in: ${value})"
+		}
+
+		if (!missing.isEmpty()) {
+			throw new GradleException("en_us.json is missing ${missing.size()} translation(s):\n  " + missing.join("\n  "))
+		}
+		logger.lifecycle("Translations OK: ${lang.size()} keys")
+	}
+}
+
+tasks.named("check") {
+	dependsOn "checkTranslations"
+}

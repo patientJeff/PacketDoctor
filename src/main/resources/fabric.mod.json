@@ -1,0 +1,34 @@
+{
+	"schemaVersion": 1,
+	"id": "packetdoctor",
+	"version": "${version}",
+	"name": "Packet Doctor",
+	"description": "Watches the packets between players and servers, warns about unstable or dangerous ones, and explains disconnects and crashes in plain language. Works on players' games and on servers; neither side needs the other.",
+	"authors": ["Packet Doctor authors"],
+	"license": "MIT",
+	"icon": "assets/packetdoctor/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.packetdoctor.PacketDoctor"
+		],
+		"client": [
+			"com.packetdoctor.client.PacketDoctorClient"
+		],
+		"modmenu": [
+			"com.packetdoctor.client.ModMenuIntegration"
+		]
+	},
+	"mixins": [
+		"packetdoctor.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.0",
+		"fabric-api": "*",
+		"minecraft": "~26.3",
+		"java": ">=25"
+	},
+	"suggests": {
+		"modmenu": "*"
+	}
+}
