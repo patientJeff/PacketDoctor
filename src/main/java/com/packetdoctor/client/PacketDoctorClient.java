@@ -10,6 +10,8 @@ import com.packetdoctor.net.PacketMonitor;
 import com.packetdoctor.net.Severity;
 import com.packetdoctor.net.Warning;
 import com.packetdoctor.network.ExplanationPayload;
+import com.packetdoctor.network.ServerStatus;
+import com.packetdoctor.network.StatusPayload;
 import com.packetdoctor.ui.DiagnosisScreen;
 import com.packetdoctor.ui.PacketDoctorScreen;
 import net.fabricmc.api.ClientModInitializer;
@@ -59,6 +61,11 @@ public final class PacketDoctorClient implements ClientModInitializer {
 		});
 		ClientConfigurationNetworking.registerGlobalReceiver(ExplanationPayload.TYPE, (payload, context) -> {
 		});
+		// How a Packet Doctor server is running, so lag can be put down to the server or not.
+		ClientPlayNetworking.registerGlobalReceiver(StatusPayload.TYPE, (payload, context) -> {
+			ServerStatus status = ServerStatus.fromJson(payload.json());
+			if (status != null) LagWatcher.get().onStatus(status);
+		});
 
 		KeyMapping.Category category = KeyMapping.Category.register(PacketDoctor.id("main"));
 		openKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
@@ -78,6 +85,7 @@ public final class PacketDoctorClient implements ClientModInitializer {
 
 	private static void tick(Minecraft client) {
 		PacketMonitor.get().tick(client);
+		LagWatcher.get().tick(client);
 
 		while (openKey.consumeClick()) {
 			client.gui.setScreen(new PacketDoctorScreen(client.gui.screen()));
@@ -128,6 +136,23 @@ public final class PacketDoctorClient implements ClientModInitializer {
 			SystemToast.addOrUpdate(client.gui.toastManager(), TOAST,
 					Component.literal(w.title()).withColor(w.severity.color & 0xFFFFFF),
 					Component.translatable("packetdoctor.toast.message", detail, key));
+		});
+	}
+
+	private static final SystemToast.SystemToastId LAG_TOAST = new SystemToast.SystemToastId(7001L);
+
+	/** Lag has started: say where it comes from (any thread). */
+	public static void notifyLag(LagWatcher.Cause cause, LagWatcher.Finding finding) {
+		Config c = config;
+		if (c == null || !c.toasts || !c.lagToasts) return;
+		Minecraft client = Minecraft.getInstance();
+		client.execute(() -> {
+			if (client.gui.screen() instanceof PacketDoctorScreen) return;
+			String key = openKey.isUnbound() ? Component.translatable("packetdoctor.toast.the_key").getString()
+					: openKey.getTranslatedKeyMessage().getString();
+			SystemToast.addOrUpdate(client.gui.toastManager(), LAG_TOAST,
+					Component.translatable("packetdoctor.lag.toast", cause.label()).withColor(finding.severity().color & 0xFFFFFF),
+					Component.translatable("packetdoctor.lag.toast.body", finding.shortText(), key));
 		});
 	}
 

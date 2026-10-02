@@ -189,6 +189,7 @@ public final class PacketMonitor implements ConnectionObserver, RuleSink {
 	}
 
 	private void inboundOne(Packet<?> packet, String phase, long now) {
+		com.packetdoctor.client.LagWatcher.get().onInbound(packet);
 		String id = PacketNames.id(packet);
 		Integer size = decodedSizes.remove(packet);
 		PacketRecord record = new PacketRecord(now, Direction.IN, phase, id, size == null ? -1 : size);

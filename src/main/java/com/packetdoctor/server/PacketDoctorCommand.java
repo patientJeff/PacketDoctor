@@ -5,8 +5,12 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.packetdoctor.PacketDoctor;
+import com.packetdoctor.api.ConsoleProblem;
 import com.packetdoctor.api.CrashInfo;
 import com.packetdoctor.api.DisconnectInfo;
+import com.packetdoctor.api.LagCause;
+import com.packetdoctor.api.LagSpikeInfo;
+import com.packetdoctor.api.PerformanceInfo;
 import com.packetdoctor.api.PlayerReport;
 import com.packetdoctor.api.WarningInfo;
 import com.packetdoctor.net.PacketExport;
@@ -14,6 +18,9 @@ import com.packetdoctor.net.PacketNames;
 import com.packetdoctor.net.ServerMonitor;
 import com.packetdoctor.net.Severity;
 import com.packetdoctor.net.Warning;
+import com.packetdoctor.server.console.ConsoleCapture;
+import com.packetdoctor.server.perf.LagAnalysis;
+import com.packetdoctor.server.perf.LagMonitor;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -41,7 +48,9 @@ import static com.packetdoctor.Tr.t;
  *   <li>{@code /packetdoctor disconnects [count]} - recent disconnects and why</li>
  *   <li>{@code /packetdoctor export <name>} - save a player's packet log to a file</li>
  *   <li>{@code /packetdoctor clear <name>} - forget a player's warnings</li>
- *   <li>{@code /packetdoctor crash} - the last server crash, explained</li>
+ *   <li>{@code /packetdoctor crash} - the last server crash (or unexpected stop), explained</li>
+ *   <li>{@code /packetdoctor lag} - TPS, what slow ticks are spent on, and recent lag spikes</li>
+ *   <li>{@code /packetdoctor console [clear]} - console warnings and errors, grouped and explained</li>
  * </ul>
  */
 final class PacketDoctorCommand {
@@ -67,7 +76,10 @@ final class PacketDoctorCommand {
 				.then(Commands.literal("clear")
 						.then(Commands.argument("name", StringArgumentType.word()).suggests(PacketDoctorCommand::names)
 								.executes(PacketDoctorCommand::clear)))
-				.then(Commands.literal("crash").executes(PacketDoctorCommand::crash)));
+				.then(Commands.literal("crash").executes(PacketDoctorCommand::crash))
+				.then(Commands.literal("lag").executes(PacketDoctorCommand::lag))
+				.then(Commands.literal("console").executes(PacketDoctorCommand::console)
+						.then(Commands.literal("clear").executes(PacketDoctorCommand::clearConsole))));
 	}
 
 	private static java.util.concurrent.CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> names(
@@ -198,6 +210,97 @@ final class PacketDoctorCommand {
 		if (s == null) return 0;
 		s.warnings().clear();
 		send(c, header(t("packetdoctor.cmd.cleared", s.name)));
+		return 1;
+	}
+
+	private static int lag(CommandContext<CommandSourceStack> c) {
+		LagMonitor m = LagMonitor.get();
+		if (m == null || !c.getSource().getServer().isDedicatedServer() || !PacketDoctorServer.config().lagMonitor) {
+			c.getSource().sendFailure(Component.literal(t("packetdoctor.cmd.lag.off")));
+			return 0;
+		}
+		PerformanceInfo p = m.performance();
+		send(c, header(t("packetdoctor.cmd.lag.title")));
+		send(c, Component.literal(t("packetdoctor.cmd.lag.tps", tps(p.tps10s()), tps(p.tps1m()), tps(p.tps5m()), tps(p.targetTps())))
+				.withStyle(tpsColor(p.tps1m(), p.targetTps())));
+		send(c, Component.literal(t("packetdoctor.cmd.lag.mspt", String.format(Locale.ROOT, "%.1f", p.msptAverage()),
+				String.format(Locale.ROOT, "%.0f", p.msptMax()), String.format(Locale.ROOT, "%.0f", 1000 / Math.max(1, p.targetTps()))))
+				.withStyle(ChatFormatting.GRAY));
+		if (p.overloaded()) send(c, Component.literal(t("packetdoctor.cmd.lag.overloaded")).withStyle(ChatFormatting.RED));
+
+		if (p.causes().isEmpty()) {
+			send(c, Component.literal(t("packetdoctor.cmd.lag.no_slow")).withStyle(ChatFormatting.GREEN));
+		} else {
+			send(c, Component.literal(t("packetdoctor.cmd.lag.causes")).withStyle(ChatFormatting.WHITE));
+			for (LagCause cause : p.causes()) send(c, causeLine(cause));
+		}
+		send(c, Component.literal(t("packetdoctor.cmd.lag.world", PacketNames.count(p.loadedChunks()), PacketNames.count(p.entities()),
+				p.topEntities().isEmpty() ? "-" : String.join(", ", p.topEntities().subList(0, Math.min(3, p.topEntities().size()))))).withStyle(ChatFormatting.DARK_GRAY));
+
+		List<LagSpikeInfo> spikes = m.spikes(5);
+		if (!spikes.isEmpty()) {
+			send(c, Component.literal(t("packetdoctor.cmd.lag.spikes")).withStyle(ChatFormatting.WHITE));
+			for (LagSpikeInfo s : spikes) {
+				MutableComponent hover = Component.literal(s.summary()).withStyle(ChatFormatting.WHITE);
+				for (LagCause cause : s.causes()) hover.append(Component.literal("\n" + LagAnalysis.line(cause)).withStyle(ChatFormatting.GRAY));
+				for (String line : s.consoleLines()) hover.append(Component.literal("\n" + line).withStyle(ChatFormatting.DARK_GRAY));
+				String top = s.causes().isEmpty() ? t("packetdoctor.cmd.lag.unknown")
+						: s.causes().getFirst().label() + String.format(Locale.ROOT, " %.0f%%", s.causes().getFirst().percent());
+				send(c, Component.literal(" " + TIME.format(Instant.ofEpochMilli(s.time())) + "  ").withStyle(ChatFormatting.DARK_GRAY)
+						.append(Component.literal(LagAnalysis.seconds(s.durationMs())).withStyle(ChatFormatting.YELLOW))
+						.append(Component.literal("  " + top).withStyle(ChatFormatting.GRAY))
+						.withStyle(style -> style.withHoverEvent(new HoverEvent.ShowText(hover))));
+			}
+		}
+		return (int) Math.round(p.tps1m());
+	}
+
+	private static Component causeLine(LagCause cause) {
+		MutableComponent hover = Component.literal(cause.advice()).withStyle(ChatFormatting.WHITE);
+		return Component.literal(String.format(Locale.ROOT, " %3.0f%% ", cause.percent())).withStyle(ChatFormatting.YELLOW)
+				.append(Component.literal(cause.label()).withStyle(ChatFormatting.WHITE))
+				.append(Component.literal(cause.mod() != null ? "  " + cause.mod() : "").withStyle(ChatFormatting.LIGHT_PURPLE))
+				.append(Component.literal(cause.examples().isEmpty() ? "" : "  (" + String.join(", ", cause.examples()) + ")").withStyle(ChatFormatting.GRAY))
+				.withStyle(style -> style.withHoverEvent(new HoverEvent.ShowText(hover)));
+	}
+
+	private static String tps(double v) {
+		return String.format(Locale.ROOT, "%.1f", v);
+	}
+
+	private static ChatFormatting tpsColor(double tps, double target) {
+		return tps >= target * 0.95 ? ChatFormatting.GREEN : tps >= target * 0.75 ? ChatFormatting.YELLOW : ChatFormatting.RED;
+	}
+
+	private static int console(CommandContext<CommandSourceStack> c) {
+		ConsoleCapture capture = ConsoleCapture.get();
+		if (capture == null) {
+			c.getSource().sendFailure(Component.literal(t("packetdoctor.cmd.console.off")));
+			return 0;
+		}
+		List<ConsoleProblem> problems = capture.problems();
+		send(c, header(t("packetdoctor.cmd.console.title", problems.size())));
+		if (problems.isEmpty()) send(c, Component.literal(t("packetdoctor.cmd.console.none")).withStyle(ChatFormatting.GREEN));
+		for (ConsoleProblem p : problems.subList(0, Math.min(10, problems.size()))) {
+			Severity severity = Severity.valueOf(p.severity());
+			MutableComponent hover = Component.literal(p.explanation()).withStyle(ChatFormatting.GRAY)
+					.append(Component.literal("\n\n" + p.advice()).withStyle(ChatFormatting.WHITE))
+					.append(Component.literal("\n\n" + p.example()).withStyle(ChatFormatting.DARK_GRAY))
+					.append(Component.literal("\n" + t("packetdoctor.cmd.console.seen", TIME.format(Instant.ofEpochMilli(p.firstSeen())),
+							TIME.format(Instant.ofEpochMilli(p.lastSeen())))).withStyle(ChatFormatting.DARK_GRAY));
+			send(c, Component.literal(" [" + severity.label() + "] ").withColor(severity.color & 0xFFFFFF)
+					.append(Component.literal(p.title() + (p.count() > 1 ? " x" + p.count() : "")).withStyle(ChatFormatting.WHITE))
+					.withStyle(style -> style.withHoverEvent(new HoverEvent.ShowText(hover))));
+		}
+		if (problems.size() > 10) send(c, Component.literal(t("packetdoctor.cmd.more", problems.size() - 10)).withStyle(ChatFormatting.DARK_GRAY));
+		if (!problems.isEmpty()) send(c, Component.literal(t("packetdoctor.cmd.console.hover")).withStyle(ChatFormatting.DARK_GRAY));
+		return problems.size();
+	}
+
+	private static int clearConsole(CommandContext<CommandSourceStack> c) {
+		ConsoleCapture capture = ConsoleCapture.get();
+		if (capture != null) capture.clearProblems();
+		send(c, header(t("packetdoctor.cmd.console.cleared")));
 		return 1;
 	}
 

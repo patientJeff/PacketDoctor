@@ -297,6 +297,15 @@ public final class DisconnectDiagnoser {
 	 * about our packets are shown in the player's wording and language.
 	 */
 	private static void serverSaid(Diagnosis.Builder b, ServerExplanation e, Reason why) {
+		if (e.crashHeadline() != null) {
+			// The server crashed and told us why before it went down.
+			b.severity(Severity.DANGER).headline(t("packetdoctor.dc.server_crash.headline"))
+					.summary(t("packetdoctor.dc.server_crash.summary", e.crashHeadline(), e.crashSource() != null ? e.crashSource() : "?"))
+					.source(SourceKind.SERVER, t("packetdoctor.who.server_crash", e.crashSource() != null ? e.crashSource() : "?"), t("packetdoctor.dc.server_crash.note"));
+			b.tipFirst(t("packetdoctor.tip.server_crash_tell"));
+			b.tipFirst(t("packetdoctor.tip.server_crash_wait"));
+			return;
+		}
 		switch (e.kickerKind()) {
 			case "MOD" -> {
 				String kicker = e.kicker() != null ? e.kicker() : t("packetdoctor.who.a_server_mod");

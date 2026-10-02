@@ -17,6 +17,9 @@ import java.util.List;
  * @param serverError a short description of an error the server hit on this player's data, if any
  * @param warnings    what the server noticed about this player's packets recently
  * @param modVersion  the server's Packet Doctor version
+ * @param crashKind   set when the server is going down because it crashed: CRASH, WATCHDOG or OUT_OF_MEMORY
+ * @param crashHeadline the server's own explanation of its crash, in the server's language
+ * @param crashSource what the server thinks caused it, e.g. "A mod: Lithium (lithium)"
  */
 public record ServerExplanation(
 		int version,
@@ -25,7 +28,10 @@ public record ServerExplanation(
 		@Nullable String reason,
 		@Nullable String serverError,
 		List<WarningData> warnings,
-		String modVersion) {
+		String modVersion,
+		@Nullable String crashKind,
+		@Nullable String crashHeadline,
+		@Nullable String crashSource) {
 
 	public static final int CURRENT = 1;
 	private static final Gson GSON = new Gson();

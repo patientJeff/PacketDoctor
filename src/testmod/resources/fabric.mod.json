@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"id": "pdtest",
+	"version": "1.0.0",
+	"name": "Packet Doctor test mod",
+	"description": "Development only: commands that crash the server, log errors and use the API, to test Packet Doctor. Never shipped.",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["dev.pdtest.PdTest"],
+		"client": ["dev.pdtest.PdTestClient"]
+	},
+	"depends": {
+		"packetdoctor": "*"
+	}
+}

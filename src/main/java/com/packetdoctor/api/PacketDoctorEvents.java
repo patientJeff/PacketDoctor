@@ -6,7 +6,7 @@ import net.fabricmc.fabric.api.event.EventFactory;
 import java.util.UUID;
 
 /**
- * Server-side events. Warning and disconnect listeners run on the server thread, so they
+ * Server-side events. All listeners except the crash one run on the server thread, so they
  * may touch the world and players directly. The crash listener runs on the crashing
  * thread while the server goes down: keep it short and never throw.
  *
@@ -41,6 +41,33 @@ public final class PacketDoctorEvents {
 				}
 			});
 
+	/** Dedicated servers: a lag spike ended, with what it was spent on. Server thread. */
+	public static final Event<LagSpikeListener> LAG_SPIKE = EventFactory.createArrayBacked(LagSpikeListener.class,
+			listeners -> spike -> {
+				for (LagSpikeListener l : listeners) l.onLagSpike(spike);
+			});
+
+	/** Dedicated servers: TPS has stayed low for a while. Server thread. */
+	public static final Event<PerformanceListener> SERVER_OVERLOADED = EventFactory.createArrayBacked(PerformanceListener.class,
+			listeners -> info -> {
+				for (PerformanceListener l : listeners) l.onPerformanceChange(info);
+			});
+
+	/** Dedicated servers: after being overloaded, the server is keeping up again. Server thread. */
+	public static final Event<PerformanceListener> SERVER_RECOVERED = EventFactory.createArrayBacked(PerformanceListener.class,
+			listeners -> info -> {
+				for (PerformanceListener l : listeners) l.onPerformanceChange(info);
+			});
+
+	/**
+	 * Dedicated servers: a new kind of warning or error appeared in the console, or an
+	 * existing one reached 10, 100 or 1000 repeats ({@link ConsoleProblem#count()}). Server thread.
+	 */
+	public static final Event<ConsoleProblemListener> CONSOLE_PROBLEM = EventFactory.createArrayBacked(ConsoleProblemListener.class,
+			listeners -> problem -> {
+				for (ConsoleProblemListener l : listeners) l.onConsoleProblem(problem);
+			});
+
 	private PacketDoctorEvents() {
 	}
 
@@ -57,5 +84,20 @@ public final class PacketDoctorEvents {
 	@FunctionalInterface
 	public interface CrashListener {
 		void onServerCrash(CrashInfo info);
+	}
+
+	@FunctionalInterface
+	public interface LagSpikeListener {
+		void onLagSpike(LagSpikeInfo spike);
+	}
+
+	@FunctionalInterface
+	public interface PerformanceListener {
+		void onPerformanceChange(PerformanceInfo info);
+	}
+
+	@FunctionalInterface
+	public interface ConsoleProblemListener {
+		void onConsoleProblem(ConsoleProblem problem);
 	}
 }

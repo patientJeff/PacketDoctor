@@ -21,6 +21,14 @@ repositories {
 	}
 }
 
+// Development-only test mod (src/testmod): loaded by runServer/runClient, never part of the jar.
+sourceSets {
+	testmod {
+		compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+		runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+	}
+}
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -55,13 +63,23 @@ jar {
 }
 
 loom {
+	mods {
+		packetdoctor {
+			sourceSet sourceSets.main
+		}
+		pdtest {
+			sourceSet sourceSets.testmod
+		}
+	}
 	runs {
 		// Separate folder so a dev server and dev client can run side by side.
 		server {
 			runDir "run-server"
+			source sourceSets.testmod
 		}
 		// Dev helper: ./gradlew runClient -PquickPlay=localhost joins that server on launch.
 		client {
+			source sourceSets.testmod
 			if (project.hasProperty("quickPlay")) programArgs "--quickPlayMultiplayer", project.property("quickPlay").toString()
 		}
 	}
@@ -90,9 +108,13 @@ tasks.register("checkTranslations") {
 			(text =~ /"(packetdoctor\.[A-Za-z0-9_.]+)"/).each { all, key ->
 				if (key.endsWith(".") || key.endsWith(".json")) return
 				if (lang.containsKey(key)) return
-				if (["headline", "summary", "note"].every { lang.containsKey("${key}.${it}".toString()) }) return
+				// A base key stands for a set of texts: explanations, console problems, or lag kinds.
+				def sets = [["headline", "summary", "note"], ["title", "explain", "advice"], ["label", "advice"]]
+				if (sets.any { set -> set.every { lang.containsKey("${key}.${it}".toString()) } }) return
 				missing << "${key}  (${where})"
 			}
+			// Lag findings also have a short form for pop-ups.
+			(text =~ /"(packetdoctor.lag.find.[a-z_]+)"/).each { all, key -> need("${key}.short", where) }
 
 			// Warnings. "s.w(" is a check shared by both sides (or a server-only one), so it
 			// needs both wordings; "m.w(" and a bare "w(" are the player's side only.

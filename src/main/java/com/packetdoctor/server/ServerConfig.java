@@ -39,6 +39,22 @@ public final class ServerConfig {
 	public int keepDisconnects = 100;
 	/** Saved report files to keep. */
 	public int keepReports = 30;
+	/** Time every tick and find out what slow ticks are spent on. */
+	public boolean lagMonitor = true;
+	/** A tick at least this slow (milliseconds) counts as a lag spike. 50 ms is a full tick at 20 TPS. */
+	public int lagSpikeMs = 300;
+	/** How often a slow tick is sampled, in milliseconds. Lower is more precise and costs a little more. */
+	public int lagSampleIntervalMs = 10;
+	/** Lag spikes at least this long are written to the console (0 = never). */
+	public int logLagSpikeMs = 1000;
+	/** Lag spikes at least this long alert online operators in chat (0 = never). */
+	public int alertLagSpikeMs = 2000;
+	/** Read the server console to explain errors, crashes and lag (dedicated servers). */
+	public boolean captureConsole = true;
+	/** Console lines remembered for the command and the API. */
+	public int consoleLines = 1000;
+	/** Tell players whose game has Packet Doctor how the server is running (TPS and what slows it), so they can see whether lag is the server or their side. */
+	public boolean sharePerformance = true;
 
 	private static Path path() {
 		return FabricLoader.getInstance().getConfigDir().resolve("packetdoctor-server.json");
@@ -65,6 +81,11 @@ public final class ServerConfig {
 		playerLogSize = Math.clamp(playerLogSize, 100, 100_000);
 		keepDisconnects = Math.clamp(keepDisconnects, 10, 10_000);
 		keepReports = Math.clamp(keepReports, 1, 1000);
+		lagSpikeMs = Math.clamp(lagSpikeMs, 60, 60_000);
+		lagSampleIntervalMs = Math.clamp(lagSampleIntervalMs, 2, 200);
+		logLagSpikeMs = Math.clamp(logLagSpikeMs, 0, 600_000);
+		alertLagSpikeMs = Math.clamp(alertLagSpikeMs, 0, 600_000);
+		consoleLines = Math.clamp(consoleLines, 100, 50_000);
 		try {
 			alertMinSeverity = com.packetdoctor.net.Severity.valueOf(alertMinSeverity.toUpperCase(Locale.ROOT)).name();
 		} catch (RuntimeException e) {
@@ -96,6 +117,14 @@ public final class ServerConfig {
 		m.put("playerLogSize", playerLogSize);
 		m.put("keepDisconnects", keepDisconnects);
 		m.put("keepReports", keepReports);
+		m.put("lagMonitor", lagMonitor);
+		m.put("lagSpikeMs", lagSpikeMs);
+		m.put("lagSampleIntervalMs", lagSampleIntervalMs);
+		m.put("logLagSpikeMs", logLagSpikeMs);
+		m.put("alertLagSpikeMs", alertLagSpikeMs);
+		m.put("captureConsole", captureConsole);
+		m.put("consoleLines", consoleLines);
+		m.put("sharePerformance", sharePerformance);
 		return m;
 	}
 
@@ -116,6 +145,14 @@ public final class ServerConfig {
 				case "playerLogSize" -> playerLogSize = ((Number) value).intValue();
 				case "keepDisconnects" -> keepDisconnects = ((Number) value).intValue();
 				case "keepReports" -> keepReports = ((Number) value).intValue();
+				case "lagMonitor" -> lagMonitor = (Boolean) value;
+				case "lagSpikeMs" -> lagSpikeMs = ((Number) value).intValue();
+				case "lagSampleIntervalMs" -> lagSampleIntervalMs = ((Number) value).intValue();
+				case "logLagSpikeMs" -> logLagSpikeMs = ((Number) value).intValue();
+				case "alertLagSpikeMs" -> alertLagSpikeMs = ((Number) value).intValue();
+				case "captureConsole" -> captureConsole = (Boolean) value;
+				case "consoleLines" -> consoleLines = ((Number) value).intValue();
+				case "sharePerformance" -> sharePerformance = (Boolean) value;
 				default -> {
 					return false;
 				}
