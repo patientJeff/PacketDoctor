@@ -1,6 +1,7 @@
 package com.packetdoctor;
 
 import com.packetdoctor.network.ExplanationPayload;
+import com.packetdoctor.network.StatusPayload;
 import com.packetdoctor.server.PacketDoctorServer;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -26,6 +27,7 @@ public final class PacketDoctor implements ModInitializer {
 		// Registered on both sides: the server encodes it, the player's game decodes it.
 		PayloadTypeRegistry.clientboundPlay().register(ExplanationPayload.TYPE, ExplanationPayload.CODEC);
 		PayloadTypeRegistry.clientboundConfiguration().register(ExplanationPayload.TYPE, ExplanationPayload.CODEC);
+		PayloadTypeRegistry.clientboundPlay().register(StatusPayload.TYPE, StatusPayload.CODEC);
 		PacketDoctorServer.init();
 	}
 

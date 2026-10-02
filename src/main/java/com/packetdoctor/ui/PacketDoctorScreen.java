@@ -3,6 +3,7 @@ package com.packetdoctor.ui;
 import com.mojang.blaze3d.Blaze3D;
 import com.packetdoctor.Config;
 import com.packetdoctor.PacketDoctor;
+import com.packetdoctor.client.LagWatcher;
 import com.packetdoctor.client.PacketDoctorClient;
 import com.packetdoctor.diagnose.CrashHandler;
 import com.packetdoctor.diagnose.Diagnosis;
@@ -38,6 +39,7 @@ import java.util.function.IntConsumer;
  * The main window (default key: K; also Mod Menu's Configure button). Tabs:
  * <ul>
  *   <li><b>Warnings</b> - problems found on this connection, explained.</li>
+ *   <li><b>Lag</b> - whether lag right now is the server, the connection or the game, and why.</li>
  *   <li><b>Live</b> - every packet as it goes by, newest first; flagged ones are coloured.</li>
  *   <li><b>Stats</b> - totals per packet type.</li>
  *   <li><b>History</b> - disconnect and crash explanations; click one to open it.</li>
@@ -48,6 +50,7 @@ import java.util.function.IntConsumer;
 public final class PacketDoctorScreen extends Screen {
 	private enum Tab {
 		WARNINGS("packetdoctor.tab.warnings"),
+		LAG("packetdoctor.tab.lag"),
 		LIVE("packetdoctor.tab.live"),
 		STATS("packetdoctor.tab.stats"),
 		HISTORY("packetdoctor.tab.history"),
@@ -61,6 +64,7 @@ public final class PacketDoctorScreen extends Screen {
 	}
 
 	private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault());
+	private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 	private static final int GREEN = 0xFF9BE39B;
 	private static Tab lastTab = Tab.WARNINGS;
 
@@ -80,6 +84,11 @@ public final class PacketDoctorScreen extends Screen {
 		super(Component.translatable("packetdoctor.title"));
 		this.parent = parent;
 		this.tab = tab;
+	}
+
+	/** Opens straight on the Lag tab. */
+	public static PacketDoctorScreen lag(@Nullable Screen parent) {
+		return new PacketDoctorScreen(parent, Tab.LAG);
 	}
 
 	/** Opens straight on the Settings tab (Mod Menu's Configure button). */
@@ -114,6 +123,8 @@ public final class PacketDoctorScreen extends Screen {
 				PacketMonitor.get().warnings().clear();
 				rebuild(false);
 			}));
+			case LAG -> {
+			}
 			case HISTORY, SETTINGS -> bar.add(Button.builder(Component.translatable("packetdoctor.button.open_folder"), b -> openReports()));
 		}
 		bar.add(Button.builder(Component.translatable("gui.done"), b -> onClose()));
@@ -133,7 +144,7 @@ public final class PacketDoctorScreen extends Screen {
 	public void tick() {
 		ticks++;
 		boolean live = (tab == Tab.LIVE || tab == Tab.STATS) && !frozen && ticks % 10 == 0;
-		if (live || tab == Tab.WARNINGS && ticks % 20 == 0) rebuild(true);
+		if (live || (tab == Tab.WARNINGS || tab == Tab.LAG) && ticks % 20 == 0) rebuild(true);
 	}
 
 	private void rebuild(boolean keepScroll) {
@@ -141,6 +152,7 @@ public final class PacketDoctorScreen extends Screen {
 		panel.clear();
 		switch (tab) {
 			case WARNINGS -> buildWarnings();
+			case LAG -> buildLag();
 			case LIVE -> buildLive();
 			case STATS -> buildStats();
 			case HISTORY -> buildHistory();
@@ -186,6 +198,87 @@ public final class PacketDoctorScreen extends Screen {
 			if (source != null) panel.wrapped(font, Component.translatable("packetdoctor.warnings.source", source), 0xFFFF8AD8, 12);
 			panel.blank();
 		}
+	}
+
+	private void buildLag() {
+		LagWatcher.Snapshot s = LagWatcher.get().snapshot();
+		if (!s.connected()) {
+			panel.wrapped(font, Component.translatable("packetdoctor.status.not_connected"), DiagnosisScreen.MUTED, 0);
+			lagEpisodes();
+			return;
+		}
+		boolean local = s.tpsSource().equals("SINGLEPLAYER");
+
+		// Right now: the verdict, what was noticed, and what to do.
+		heading("packetdoctor.lag.ui.now");
+		LagWatcher.Cause primary = s.primary();
+		if (primary == null) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.none"), GREEN, 0);
+		} else {
+			Severity worst = Severity.INFO;
+			for (LagWatcher.Finding f : s.findings()) if (f.cause() == primary && f.severity().ordinal() > worst.ordinal()) worst = f.severity();
+			panel.wrapped(font, Component.literal(primary.verdict()).withStyle(ChatFormatting.BOLD), worst.color, 0);
+		}
+		for (LagWatcher.Finding f : s.findings()) {
+			panel.hanging(font, "•", Component.literal(f.text()), f.severity() == Severity.INFO ? DiagnosisScreen.MUTED : f.severity().color, 8, 18);
+		}
+		if (primary != null) panel.wrapped(font, Component.literal(primary.advice()), DiagnosisScreen.TEXT, 8);
+
+		// The server.
+		heading(local ? "packetdoctor.lag.ui.world" : "packetdoctor.lag.ui.server");
+		if (s.tps() == null) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.tps_unknown"), DiagnosisScreen.MUTED, 8);
+		} else {
+			double tps = s.tps();
+			int color = tps >= s.targetTps() * 0.95 ? GREEN : tps >= s.targetTps() * 0.75 ? Severity.WARNING.color : Severity.DANGER.color;
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.tps", LagWatcher.fmt(tps), LagWatcher.fmt(s.targetTps()),
+					Component.translatable("packetdoctor.lag.source." + s.tpsSource().toLowerCase(Locale.ROOT))), color, 8);
+		}
+		if (s.mspt() != null) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.mspt", LagWatcher.fmt(s.mspt()),
+					s.msptMax() == null ? "-" : String.format(Locale.ROOT, "%.0f", s.msptMax())), DiagnosisScreen.MUTED, 8);
+		}
+		if (!s.serverCauses().isEmpty()) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.server_causes"), DiagnosisScreen.TEXT, 8);
+			for (var c : s.serverCauses()) panel.hanging(font, "-", Component.literal(LagWatcher.causeText(c)), DiagnosisScreen.TEXT, 8, 18);
+		}
+
+		// The connection.
+		heading("packetdoctor.lag.ui.connection");
+		if (local) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.ping_local"), DiagnosisScreen.MUTED, 8);
+		} else if (s.pingMs() < 0) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.ping_unknown"), DiagnosisScreen.MUTED, 8);
+		} else {
+			int color = s.pingMs() <= 150 && s.jitterMs() <= 40 && s.lostPings() == 0 ? GREEN : s.pingMs() > 600 ? Severity.DANGER.color : Severity.WARNING.color;
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.ping", s.pingMs(), s.jitterMs(), s.lostPings()), color, 8);
+		}
+
+		// The game.
+		heading("packetdoctor.lag.ui.game");
+		int color = s.fps() >= 30 && s.memoryPercent() < 90 ? GREEN : Severity.WARNING.color;
+		panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.fps", s.fps(), s.memoryPercent()), color, 8);
+
+		lagEpisodes();
+	}
+
+	private void lagEpisodes() {
+		heading("packetdoctor.lag.ui.recent");
+		List<LagWatcher.Episode> episodes = LagWatcher.get().episodes();
+		if (episodes.isEmpty()) {
+			panel.wrapped(font, Component.translatable("packetdoctor.lag.ui.no_episodes"), DiagnosisScreen.MUTED, 8);
+			return;
+		}
+		for (LagWatcher.Episode e : episodes) {
+			String when = CLOCK.format(Instant.ofEpochMilli(e.start()));
+			String length = e.end() == 0 ? Component.translatable("packetdoctor.lag.ui.ongoing").getString() : LagWatcher.seconds(e.end() - e.start());
+			panel.hanging(font, when, Component.literal(e.cause().label() + " (" + length + "): " + e.text()), DiagnosisScreen.TEXT, 8, 58);
+		}
+	}
+
+	private void heading(String key) {
+		panel.blank();
+		panel.wrapped(font, Component.translatable(key).withStyle(ChatFormatting.BOLD), DiagnosisScreen.HEADING, 0);
 	}
 
 	private void buildLive() {
@@ -279,6 +372,8 @@ public final class PacketDoctorScreen extends Screen {
 				v -> c.toastCooldownSeconds = v);
 		toggle("packetdoctor.settings.title_button", c.titleScreenButton, () -> c.titleScreenButton = !c.titleScreenButton);
 		toggle("packetdoctor.settings.open_crash", c.openCrashExplanation, () -> c.openCrashExplanation = !c.openCrashExplanation);
+		toggle("packetdoctor.settings.lag_toasts", c.lagToasts, () -> c.lagToasts = !c.lagToasts);
+		toggle("packetdoctor.settings.measure_ping", c.measurePing, () -> c.measurePing = !c.measurePing);
 		cycle("packetdoctor.settings.log_size", PacketNames.count(c.logSize), new int[] {10_000, 50_000, 100_000, 200_000}, c.logSize, v -> {
 			c.logSize = v;
 			PacketMonitor.get().log().resize(v);

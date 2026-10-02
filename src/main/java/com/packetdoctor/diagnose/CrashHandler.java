@@ -44,16 +44,50 @@ public final class CrashHandler {
 		}
 	}
 
+	/**
+	 * A dedicated server failed to start. With an exception it is explained like a crash;
+	 * without one, from the console lines just before.
+	 */
+	public static void onServerStartupFailure(String message, @Nullable Throwable thrown) {
+		if (!SERVER_HANDLED.compareAndSet(false, true)) return;
+		Diagnosis d;
+		try {
+			d = thrown != null
+					? CrashDiagnoser.diagnose(CrashReport.forThrowable(thrown, CrashDiagnoser.STARTUP_TITLE), true)
+					: CrashDiagnoser.startupFromConsole(message);
+		} catch (Throwable t) {
+			PacketDoctor.LOGGER.warn("Couldn't explain why the server didn't start", t);
+			return;
+		}
+		try {
+			d = finish(d, true, Reports.SERVER_CRASH);
+		} catch (Throwable t) {
+			PacketDoctor.LOGGER.warn("Couldn't save the start-up failure explanation", t);
+		}
+		Consumer<Diagnosis> listener = serverCrashListener;
+		if (listener != null) {
+			try {
+				listener.accept(d);
+			} catch (Throwable ignored) {
+			}
+		}
+	}
+
+	private static Diagnosis finish(Diagnosis d, boolean server, String pendingFile) {
+		d = Reports.save(d, keepReports);
+		Reports.savePendingCrash(pendingFile, d);
+		PacketDoctor.LOGGER.error("Packet Doctor: {} -> {}", d.headline(), d.sourceLabel());
+		if (server) {
+			PacketDoctor.LOGGER.error("  {}", d.summary());
+			for (int i = 0; i < d.tips().size(); i++) PacketDoctor.LOGGER.error("  {}. {}", i + 1, d.tips().get(i));
+			if (d.reportFile() != null) PacketDoctor.LOGGER.error("  Full report: {}", d.reportFile());
+		}
+		return d;
+	}
+
 	private static @Nullable Diagnosis handle(CrashReport report, boolean server, String pendingFile) {
 		try {
-			Diagnosis d = CrashDiagnoser.diagnose(report, server);
-			d = Reports.save(d, keepReports);
-			Reports.savePendingCrash(pendingFile, d);
-			PacketDoctor.LOGGER.error("Packet Doctor: {} -> {}", d.headline(), d.sourceLabel());
-			if (server) {
-				for (int i = 0; i < d.tips().size(); i++) PacketDoctor.LOGGER.error("  {}. {}", i + 1, d.tips().get(i));
-			}
-			return d;
+			return finish(CrashDiagnoser.diagnose(report, server), server, pendingFile);
 		} catch (Throwable t) {
 			try {
 				PacketDoctor.LOGGER.warn("Couldn't explain the crash", t);

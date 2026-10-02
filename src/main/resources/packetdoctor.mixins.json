@@ -10,6 +10,9 @@
 		"ServerCommonPacketListenerImplMixin",
 		"ServerLoginPacketListenerImplMixin"
 	],
+	"server": [
+		"ServerWatchdogMixin"
+	],
 	"client": [
 		"ClientCommonPacketListenerImplMixin",
 		"DisconnectedScreenMixin",

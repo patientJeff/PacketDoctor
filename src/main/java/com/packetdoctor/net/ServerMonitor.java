@@ -110,6 +110,7 @@ public final class ServerMonitor implements ConnectionObserver {
 
 	/** Forgets everything (a new server is starting, e.g. another singleplayer world). */
 	public void reset() {
+		crash = null;
 		online.clear();
 		byConnection.clear();
 		ended.clear();
@@ -318,6 +319,31 @@ public final class ServerMonitor implements ConnectionObserver {
 		return new Kick("SERVER", null, null, false, now);
 	}
 
+	/** The server's crash, as players are told about it. */
+	private record CrashNote(String kind, String headline, String source) {
+	}
+
+	private volatile @Nullable CrashNote crash;
+
+	/**
+	 * The server crashed (any thread, also the watchdog's while the server thread is stuck).
+	 * Every player with Packet Doctor is told now, because after a watchdog crash the server
+	 * can't kick anyone: their games only see the connection die. The shutdown kicks that may
+	 * follow don't send a second, vaguer explanation.
+	 */
+	public void onServerCrash(String kind, String headline, String source) {
+		crash = new CrashNote(kind, headline, source);
+		if (!config.get().sendExplanations) return;
+		long now = System.currentTimeMillis();
+		for (PlayerSession s : online.values()) {
+			Connection c = s.connection.get();
+			if (c == null || !(c.getPacketListener() instanceof ServerCommonPacketListenerImpl listener)) continue;
+			Kick kick = new Kick("SERVER", null, null, true, now);
+			s.kick = kick;
+			s.explanationSent = sendExplanation(listener, s, kick);
+		}
+	}
+
 	private boolean sendExplanation(ServerCommonPacketListenerImpl listener, @Nullable PlayerSession s, Kick kick) {
 		try {
 			boolean play = listener instanceof ServerGamePacketListenerImpl;
@@ -335,8 +361,10 @@ public final class ServerMonitor implements ConnectionObserver {
 					warnings.add(w.toData());
 				}
 			}
+			CrashNote c = crash;
 			ServerExplanation explanation = new ServerExplanation(ServerExplanation.CURRENT, kick.kind(), kick.kicker(),
-					kick.reason(), error, warnings, PacketDoctor.version());
+					kick.reason(), error, warnings, PacketDoctor.version(), c == null ? null : c.kind(), c == null ? null : c.headline(),
+					c == null ? null : c.source());
 			ExplanationPayload payload = new ExplanationPayload(explanation.toJson());
 			listener.send(play ? ServerPlayNetworking.createClientboundPacket(payload) : ServerConfigurationNetworking.createClientboundPacket(payload));
 			return true;

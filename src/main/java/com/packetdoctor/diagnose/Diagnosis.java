@@ -21,6 +21,7 @@ import java.util.List;
  * @param original        the game's own message, word for word
  * @param technical       details for modders and server admins
  * @param reportFile      where the text report was saved, if it was
+ * @param cause           for server crashes: CRASH, WATCHDOG, OUT_OF_MEMORY, JVM_CRASH or STOPPED_UNEXPECTEDLY
  */
 public record Diagnosis(
 		String kind,
@@ -35,11 +36,12 @@ public record Diagnosis(
 		List<String> warnings,
 		String original,
 		String technical,
-		@Nullable String reportFile) {
+		@Nullable String reportFile,
+		@Nullable String cause) {
 
 	public Diagnosis withReportFile(@Nullable String file) {
 		return new Diagnosis(kind, time, severity, headline, summary, sourceKind, source, sourceNote, tips, warnings,
-				original, technical, file);
+				original, technical, file, cause);
 	}
 
 	public boolean isCrash() {
@@ -68,6 +70,7 @@ public record Diagnosis(
 		private final List<String> warnings = new ArrayList<>();
 		private String original = "";
 		private String technical = "";
+		private @Nullable String cause;
 
 		private Builder(String kind) {
 			this.kind = kind;
@@ -121,6 +124,15 @@ public record Diagnosis(
 			return this;
 		}
 
+		Builder cause(String cause) {
+			this.cause = cause;
+			return this;
+		}
+
+		String technical() {
+			return technical;
+		}
+
 		SourceKind sourceKind() {
 			return sourceKind;
 		}
@@ -133,9 +145,13 @@ public record Diagnosis(
 			return sourceNote;
 		}
 
+		String headline() {
+			return headline;
+		}
+
 		Diagnosis build() {
 			return new Diagnosis(kind, System.currentTimeMillis(), severity, headline, summary, sourceKind, source,
-					sourceNote, List.copyOf(tips), List.copyOf(warnings), original, technical, null);
+					sourceNote, List.copyOf(tips), List.copyOf(warnings), original, technical, null, cause);
 		}
 	}
 }

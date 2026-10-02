@@ -6,9 +6,12 @@ import com.packetdoctor.net.PacketExport;
 import com.packetdoctor.net.ServerMonitor;
 import com.packetdoctor.net.Warning;
 import com.packetdoctor.server.PacketDoctorServer;
+import com.packetdoctor.server.console.ConsoleCapture;
+import com.packetdoctor.server.perf.LagMonitor;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import org.apache.logging.log4j.Level;
 import org.jspecify.annotations.Nullable;
 
 import java.io.IOException;
@@ -26,7 +29,7 @@ import java.util.UUID;
  *
  * <p>Use it only when Packet Doctor is installed, so it stays an optional dependency:
  * <pre>{@code
- * if (FabricLoader.getInstance().isModLoaded("packetdoctor") && PacketDoctorApi.VERSION >= 1) {
+ * if (FabricLoader.getInstance().isModLoaded("packetdoctor") && PacketDoctorApi.VERSION >= 2) {
  *     for (PlayerReport p : PacketDoctorApi.players()) ...
  * }
  * }</pre>
@@ -36,7 +39,7 @@ import java.util.UUID;
  */
 public final class PacketDoctorApi {
 	/** Raised when the API gains features; check it before using newer methods. */
-	public static final int VERSION = 1;
+	public static final int VERSION = 2;
 
 	private PacketDoctorApi() {
 	}
@@ -155,9 +158,54 @@ public final class PacketDoctorApi {
 		if (m != null) m.setKickReason(player, ModBlame.name(modId) + " (" + modId + ")", reason);
 	}
 
+	// --- Performance and the console (dedicated servers, API version 2) ----------------------
+
+	/**
+	 * TPS, milliseconds per tick, what slow ticks in the last minute were spent on, and loaded
+	 * chunks and entities. Empty when not on a dedicated server with the lag monitor on.
+	 */
+	public static Optional<PerformanceInfo> performance() {
+		LagMonitor m = LagMonitor.get();
+		MinecraftServer s = PacketDoctorServer.server();
+		if (m == null || s == null || !s.isDedicatedServer() || !PacketDoctorServer.config().lagMonitor) return Optional.empty();
+		return Optional.of(m.performance());
+	}
+
+	/** The latest lag spikes, newest first, each with what it was spent on and what the console printed. */
+	public static List<LagSpikeInfo> lagSpikes(int max) {
+		LagMonitor m = LagMonitor.get();
+		return m == null ? List.of() : m.spikes(max);
+	}
+
+	/**
+	 * The latest console lines, oldest first.
+	 *
+	 * @param minLevel {@code INFO}, {@code WARN} or {@code ERROR}: the least serious lines to include
+	 */
+	public static List<ConsoleLine> console(int max, String minLevel) {
+		ConsoleCapture c = ConsoleCapture.get();
+		return c == null ? List.of() : c.lines(Math.max(0, max), Level.toLevel(minLevel, Level.INFO));
+	}
+
+	/** Console warnings and errors grouped into explained problems: most serious first, then most recent. */
+	public static List<ConsoleProblem> consoleProblems() {
+		ConsoleCapture c = ConsoleCapture.get();
+		return c == null ? List.of() : c.problems();
+	}
+
+	/** Forgets the console problems seen so far (the console lines themselves are kept). */
+	public static void clearConsoleProblems() {
+		ConsoleCapture c = ConsoleCapture.get();
+		if (c != null) c.clearProblems();
+	}
+
 	// --- Server crashes and settings ----------------------------------------------------
 
-	/** The last dedicated-server crash explanation (from this run, or the previous one). */
+	/**
+	 * The last dedicated-server crash explanation, from this run or the previous one. This
+	 * includes a previous run that ended without a crash report (killed, Java itself crashing,
+	 * frozen), worked out from the logs on start-up; see {@link CrashInfo#kind()}.
+	 */
 	public static Optional<CrashInfo> lastServerCrash() {
 		return Optional.ofNullable(PacketDoctorServer.lastCrash());
 	}

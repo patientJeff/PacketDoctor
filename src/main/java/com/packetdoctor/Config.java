@@ -28,6 +28,10 @@ public final class Config {
 	public boolean titleScreenButton = true;
 	/** After a crash, open the explanation automatically the next time the title screen shows. */
 	public boolean openCrashExplanation = true;
+	/** Pop up when lag starts, saying whether it is the server, the connection or the game. */
+	public boolean lagToasts = true;
+	/** Send a ping (Minecraft's own debug ping) every second to measure the connection. */
+	public boolean measurePing = true;
 	/** How many packets are remembered, for the Live view and exports (50,000 is a few minutes of play). */
 	public int logSize = 50_000;
 	/** How many saved report files to keep in {@code .minecraft/packetdoctor/reports}. */
