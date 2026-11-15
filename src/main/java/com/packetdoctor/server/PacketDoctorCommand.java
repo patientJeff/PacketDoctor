@@ -77,9 +77,27 @@ final class PacketDoctorCommand {
 						.then(Commands.argument("name", StringArgumentType.word()).suggests(PacketDoctorCommand::names)
 								.executes(PacketDoctorCommand::clear)))
 				.then(Commands.literal("crash").executes(PacketDoctorCommand::crash))
-				.then(Commands.literal("lag").executes(PacketDoctorCommand::lag))
+				.then(Commands.literal("players").executes(PacketDoctorCommand::players))
+				.then(Commands.literal("lag").executes(PacketDoctorCommand::lag)
+						.then(withMinutes(Commands.literal("top"), LagCommands::top))
+						.then(withMinutes(Commands.literal("mods"), LagCommands::mods))
+						.then(withMinutes(Commands.literal("places"), LagCommands::places))
+						.then(withMinutes(Commands.literal("things"), LagCommands::things))
+						.then(withMinutes(Commands.literal("report"), LagCommands::report))
+						.then(Commands.literal("mod")
+								.then(withMinutes(Commands.argument("id", StringArgumentType.word()).suggests(LagCommands::modIds), LagCommands::mod)))
+						.then(Commands.literal("spike")
+								.then(Commands.argument("number", IntegerArgumentType.integer(1, 50))
+										.executes(c -> LagCommands.spike(c, IntegerArgumentType.getInteger(c, "number"))))))
 				.then(Commands.literal("console").executes(PacketDoctorCommand::console)
 						.then(Commands.literal("clear").executes(PacketDoctorCommand::clearConsole))));
+	}
+
+	/** A command that runs for the last 5 minutes, or for {@code [minutes]} given after it. */
+	private static <T extends com.mojang.brigadier.builder.ArgumentBuilder<CommandSourceStack, T>> T withMinutes(T node, LagCommands.Run run) {
+		return node.executes(c -> run.run(c, LagCommands.DEFAULT_MINUTES))
+				.then(Commands.argument("minutes", IntegerArgumentType.integer(1, 60))
+						.executes(c -> run.run(c, IntegerArgumentType.getInteger(c, "minutes"))));
 	}
 
 	private static java.util.concurrent.CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> names(
@@ -143,6 +161,8 @@ final class PacketDoctorCommand {
 		PlayerReport r = s.report();
 		send(c, header(s.name + (online ? "" : " " + t("packetdoctor.cmd.offline"))));
 		send(c, Component.literal(t(r.hasClientMod() ? "packetdoctor.cmd.mod_yes" : "packetdoctor.cmd.mod_no")).withStyle(ChatFormatting.GRAY));
+		if (online) PlayerCommands.details(c, s);
+		send(c, Component.literal(t("packetdoctor.cmd.player.section.traffic")).withStyle(ChatFormatting.WHITE));
 		send(c, Component.literal(t("packetdoctor.cmd.traffic",
 				String.format(Locale.ROOT, "%.0f", r.packetsFromPlayerPerSecond()), PacketNames.count(r.packetsFromPlayer()), PacketNames.bytes(r.bytesFromPlayer()),
 				String.format(Locale.ROOT, "%.0f", r.packetsToPlayerPerSecond()), PacketNames.count(r.packetsToPlayer()), PacketNames.bytes(r.bytesToPlayer())))
@@ -170,6 +190,10 @@ final class PacketDoctorCommand {
 			}
 		}
 		return 1;
+	}
+
+	private static int players(CommandContext<CommandSourceStack> c) {
+		return PlayerCommands.players(c);
 	}
 
 	private static int disconnects(CommandContext<CommandSourceStack> c, int count) {
@@ -236,6 +260,7 @@ final class PacketDoctorCommand {
 		}
 		send(c, Component.literal(t("packetdoctor.cmd.lag.world", PacketNames.count(p.loadedChunks()), PacketNames.count(p.entities()),
 				p.topEntities().isEmpty() ? "-" : String.join(", ", p.topEntities().subList(0, Math.min(3, p.topEntities().size()))))).withStyle(ChatFormatting.DARK_GRAY));
+		LagCommands.biggest(c, m, 5);
 
 		List<LagSpikeInfo> spikes = m.spikes(5);
 		if (!spikes.isEmpty()) {
@@ -246,10 +271,13 @@ final class PacketDoctorCommand {
 				for (String line : s.consoleLines()) hover.append(Component.literal("\n" + line).withStyle(ChatFormatting.DARK_GRAY));
 				String top = s.causes().isEmpty() ? t("packetdoctor.cmd.lag.unknown")
 						: s.causes().getFirst().label() + String.format(Locale.ROOT, " %.0f%%", s.causes().getFirst().percent());
+				hover.append(Component.literal("\n\n" + t("packetdoctor.cmd.lag.spike_click")).withStyle(ChatFormatting.YELLOW));
+				int number = spikes.indexOf(s) + 1;
 				send(c, Component.literal(" " + TIME.format(Instant.ofEpochMilli(s.time())) + "  ").withStyle(ChatFormatting.DARK_GRAY)
 						.append(Component.literal(LagAnalysis.seconds(s.durationMs())).withStyle(ChatFormatting.YELLOW))
 						.append(Component.literal("  " + top).withStyle(ChatFormatting.GRAY))
-						.withStyle(style -> style.withHoverEvent(new HoverEvent.ShowText(hover))));
+						.withStyle(style -> style.withHoverEvent(new HoverEvent.ShowText(hover))
+								.withClickEvent(new ClickEvent.RunCommand("/packetdoctor lag spike " + number))));
 			}
 		}
 		return (int) Math.round(p.tps1m());

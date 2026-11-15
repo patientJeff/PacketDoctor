@@ -5,6 +5,7 @@ import net.minecraft.CrashReport;
 import org.jspecify.annotations.Nullable;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -21,8 +22,22 @@ public final class CrashHandler {
 	public static volatile int keepReports = 30;
 	/** Told about a server crash explanation (the API fires its event from here). */
 	public static volatile @Nullable Consumer<Diagnosis> serverCrashListener;
+	/**
+	 * Keeps a dedicated server's crash files: the explanation (null if it couldn't be made)
+	 * and Minecraft's crash report, if there is one.
+	 */
+	public static volatile @Nullable BiConsumer<@Nullable Diagnosis, @Nullable CrashReport> serverArchiver;
 
 	private CrashHandler() {
+	}
+
+	private static void archive(@Nullable Diagnosis d, @Nullable CrashReport report) {
+		BiConsumer<@Nullable Diagnosis, @Nullable CrashReport> archiver = serverArchiver;
+		if (archiver == null) return;
+		try {
+			archiver.accept(d, report);
+		} catch (Throwable ignored) {
+		}
 	}
 
 	/** The player's game crashed. */
@@ -35,6 +50,7 @@ public final class CrashHandler {
 	public static void onServerCrash(CrashReport report) {
 		if (!SERVER_HANDLED.compareAndSet(false, true)) return;
 		Diagnosis d = handle(report, true, Reports.SERVER_CRASH);
+		archive(d, report);
 		Consumer<Diagnosis> listener = serverCrashListener;
 		if (d != null && listener != null) {
 			try {
@@ -51,12 +67,13 @@ public final class CrashHandler {
 	public static void onServerStartupFailure(String message, @Nullable Throwable thrown) {
 		if (!SERVER_HANDLED.compareAndSet(false, true)) return;
 		Diagnosis d;
+		CrashReport report = null;
 		try {
-			d = thrown != null
-					? CrashDiagnoser.diagnose(CrashReport.forThrowable(thrown, CrashDiagnoser.STARTUP_TITLE), true)
-					: CrashDiagnoser.startupFromConsole(message);
+			if (thrown != null) report = CrashReport.forThrowable(thrown, CrashDiagnoser.STARTUP_TITLE);
+			d = report != null ? CrashDiagnoser.diagnose(report, true) : CrashDiagnoser.startupFromConsole(message);
 		} catch (Throwable t) {
 			PacketDoctor.LOGGER.warn("Couldn't explain why the server didn't start", t);
+			archive(null, report);
 			return;
 		}
 		try {
@@ -64,6 +81,7 @@ public final class CrashHandler {
 		} catch (Throwable t) {
 			PacketDoctor.LOGGER.warn("Couldn't save the start-up failure explanation", t);
 		}
+		archive(d, report);
 		Consumer<Diagnosis> listener = serverCrashListener;
 		if (listener != null) {
 			try {

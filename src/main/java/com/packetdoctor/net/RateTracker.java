@@ -108,6 +108,21 @@ final class RateTracker {
 		return best;
 	}
 
+	/** The busiest types over the last {@code seconds} finished seconds, per second: "movement 20/s, arm swing 4/s". */
+	synchronized String topTypes(int seconds, int n, long now) {
+		long current = now / 1000;
+		Map<String, Integer> sum = new HashMap<>();
+		for (Second s : history) {
+			if (current - s.epochSecond() <= seconds) s.counts().forEach((k, v) -> sum.merge(k, v, Integer::sum));
+		}
+		StringBuilder sb = new StringBuilder();
+		sum.entrySet().stream().sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).limit(n).forEach(e -> {
+			if (!sb.isEmpty()) sb.append(", ");
+			sb.append(PacketNames.friendly(e.getKey())).append(' ').append(Math.round(e.getValue() / (double) Math.max(1, seconds))).append("/s");
+		});
+		return sb.toString();
+	}
+
 	synchronized void reset() {
 		second = -1;
 		total = 0;

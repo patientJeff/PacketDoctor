@@ -55,6 +55,20 @@ public final class ServerConfig {
 	public int consoleLines = 1000;
 	/** Tell players whose game has Packet Doctor how the server is running (TPS and what slows it), so they can see whether lag is the server or their side. */
 	public boolean sharePerformance = true;
+	/** Keep every file a server error leaves behind (console errors, crash reports, logs, Java crash files) in packetdoctor/errors. Never deleted automatically. */
+	public boolean keepErrorFiles = true;
+	/** The most console errors written to packetdoctor/errors/console per day, in megabytes, so an error in a loop can't fill the disk. */
+	public int errorLogMaxMbPerDay = 50;
+	/** Keep sampling normal ticks too, so /packetdoctor lag can rank what the server spends its time on even when it keeps up. */
+	public boolean profileServer = true;
+	/** How often a normal tick is sampled, in milliseconds of busy time. Lower is more precise and costs a little more. */
+	public int profileIntervalMs = 20;
+	/** Write a lag report file to packetdoctor/lag when operators are alerted about lag. */
+	public boolean autoLagReports = true;
+	/** Least minutes between automatic lag report files. */
+	public int lagReportCooldownMinutes = 10;
+	/** Lag report files kept in packetdoctor/lag. */
+	public int keepLagReports = 200;
 
 	private static Path path() {
 		return FabricLoader.getInstance().getConfigDir().resolve("packetdoctor-server.json");
@@ -86,6 +100,10 @@ public final class ServerConfig {
 		logLagSpikeMs = Math.clamp(logLagSpikeMs, 0, 600_000);
 		alertLagSpikeMs = Math.clamp(alertLagSpikeMs, 0, 600_000);
 		consoleLines = Math.clamp(consoleLines, 100, 50_000);
+		errorLogMaxMbPerDay = Math.clamp(errorLogMaxMbPerDay, 1, 100_000);
+		profileIntervalMs = Math.clamp(profileIntervalMs, 5, 1000);
+		lagReportCooldownMinutes = Math.clamp(lagReportCooldownMinutes, 0, 1440);
+		keepLagReports = Math.clamp(keepLagReports, 1, 10_000);
 		try {
 			alertMinSeverity = com.packetdoctor.net.Severity.valueOf(alertMinSeverity.toUpperCase(Locale.ROOT)).name();
 		} catch (RuntimeException e) {
@@ -125,6 +143,13 @@ public final class ServerConfig {
 		m.put("captureConsole", captureConsole);
 		m.put("consoleLines", consoleLines);
 		m.put("sharePerformance", sharePerformance);
+		m.put("keepErrorFiles", keepErrorFiles);
+		m.put("errorLogMaxMbPerDay", errorLogMaxMbPerDay);
+		m.put("profileServer", profileServer);
+		m.put("profileIntervalMs", profileIntervalMs);
+		m.put("autoLagReports", autoLagReports);
+		m.put("lagReportCooldownMinutes", lagReportCooldownMinutes);
+		m.put("keepLagReports", keepLagReports);
 		return m;
 	}
 
@@ -153,6 +178,13 @@ public final class ServerConfig {
 				case "captureConsole" -> captureConsole = (Boolean) value;
 				case "consoleLines" -> consoleLines = ((Number) value).intValue();
 				case "sharePerformance" -> sharePerformance = (Boolean) value;
+				case "keepErrorFiles" -> keepErrorFiles = (Boolean) value;
+				case "errorLogMaxMbPerDay" -> errorLogMaxMbPerDay = ((Number) value).intValue();
+				case "profileServer" -> profileServer = (Boolean) value;
+				case "profileIntervalMs" -> profileIntervalMs = ((Number) value).intValue();
+				case "autoLagReports" -> autoLagReports = (Boolean) value;
+				case "lagReportCooldownMinutes" -> lagReportCooldownMinutes = ((Number) value).intValue();
+				case "keepLagReports" -> keepLagReports = ((Number) value).intValue();
 				default -> {
 					return false;
 				}

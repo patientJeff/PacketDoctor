@@ -22,6 +22,8 @@ import com.packetdoctor.network.StatusPayload;
 import com.packetdoctor.server.console.ConsoleCapture;
 import com.packetdoctor.server.perf.LagAnalysis;
 import com.packetdoctor.server.perf.LagMonitor;
+import com.packetdoctor.server.perf.LagReport;
+import com.packetdoctor.server.perf.ProfileData;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -56,6 +58,7 @@ public final class PacketDoctorServer {
 	private static volatile @Nullable MinecraftServer server;
 	private static volatile @Nullable CrashInfo lastCrash;
 	private static PreviousRun.@Nullable State previousRun;
+	private static @Nullable Diagnosis previousCrash;
 	private static final Map<String, Long> consoleAlerts = new ConcurrentHashMap<>();
 	private static volatile boolean started;
 	private static final java.util.Queue<ConsoleProblem> pendingProblems = new java.util.concurrent.ConcurrentLinkedQueue<>();
@@ -79,8 +82,8 @@ public final class PacketDoctorServer {
 		});
 		LagMonitor.init(() -> config, new LagMonitor.Listener() {
 			@Override
-			public void onSpike(LagSpikeInfo spike) {
-				lagSpike(spike);
+			public void onSpike(LagSpikeInfo spike, ProfileData profile) {
+				lagSpike(spike, profile);
 			}
 
 			@Override
@@ -95,7 +98,14 @@ public final class PacketDoctorServer {
 		});
 		// The run marker starts here, before worlds and data packs load, so a server that never
 		// finishes starting is noticed next time too.
-		if (FabricLoader.getInstance().getEnvironmentType() == EnvType.SERVER) previousRun = PreviousRun.begin();
+		if (FabricLoader.getInstance().getEnvironmentType() == EnvType.SERVER) {
+			previousRun = PreviousRun.begin();
+			// Read now: a crash in this run (even one just as it finishes starting) replaces the file.
+			previousCrash = Reports.loadPendingCrash(Reports.SERVER_CRASH);
+			if (previousCrash != null) Reports.clearPendingCrash(Reports.SERVER_CRASH);
+			ErrorArchive.init(() -> config);
+			CrashHandler.serverArchiver = ErrorArchive::serverCrash;
+		}
 		// As early as possible, so errors while the server loads are read too.
 		if (FabricLoader.getInstance().getEnvironmentType() == EnvType.SERVER && config.captureConsole) {
 			ConsoleCapture.install(config.consoleLines, PacketDoctorServer::consoleProblem);
@@ -106,6 +116,7 @@ public final class PacketDoctorServer {
 					if (m != null) m.onCantKeepUp(ms, ticks);
 				});
 				capture.setStartupListener(PacketDoctorServer::startupFailure);
+				capture.setErrorListener(ErrorArchive::consoleError);
 			}
 		}
 
@@ -138,6 +149,7 @@ public final class PacketDoctorServer {
 			ServerMonitor monitor = ServerMonitor.get();
 			if (monitor != null) monitor.tick();
 			if (s.getTickCount() % 40 == 0) shareStatus(s);
+			if (s.isDedicatedServer()) PlayerInsight.tick(s);
 			dispatchConsoleProblems(s);
 		});
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> PacketDoctorCommand.register(dispatcher));
@@ -169,9 +181,10 @@ public final class PacketDoctorServer {
 	 */
 	private static void reportPreviousRun() {
 		LagMonitor.StuckTick stuck = LagMonitor.takePreviousStuck();
-		Diagnosis d = Reports.loadPendingCrash(Reports.SERVER_CRASH);
+		Diagnosis d = previousCrash;
+		previousCrash = null;
 		if (d != null) {
-			Reports.clearPendingCrash(Reports.SERVER_CRASH);
+			// Already taken from disk at start-up.
 		} else if (previousRun != null && !previousRun.cleanStop()) {
 			try {
 				d = PreviousRun.explain(previousRun, stuck);
@@ -180,13 +193,18 @@ public final class PacketDoctorServer {
 				PacketDoctor.LOGGER.warn("Couldn't work out how the last run ended", e);
 			}
 		}
-		if (d == null) return;
+		boolean unclean = previousRun != null && !previousRun.cleanStop();
+		if (d == null) {
+			if (unclean) ErrorArchive.afterUncleanRun(null, previousRun.start());
+			return;
+		}
 		lastCrash = crashInfo(d);
 		PacketDoctor.LOGGER.warn("The server didn't stop normally last time: {}", d.headline());
 		PacketDoctor.LOGGER.warn("  {}", d.summary());
 		PacketDoctor.LOGGER.warn("  {}", d.sourceLabel());
 		for (int i = 0; i < d.tips().size(); i++) PacketDoctor.LOGGER.warn("  {}. {}", i + 1, d.tips().get(i));
 		if (d.reportFile() != null) PacketDoctor.LOGGER.warn("  Full report: {}", d.reportFile());
+		if (unclean) ErrorArchive.afterUncleanRun(d, previousRun.start());
 	}
 
 	/**
@@ -260,16 +278,71 @@ public final class PacketDoctorServer {
 	}
 
 	/** Lag spikes arrive on the server thread. */
-	private static void lagSpike(LagSpikeInfo spike) {
-		if (config.logLagSpikeMs > 0 && spike.durationMs() >= config.logLagSpikeMs) {
+	private static void lagSpike(LagSpikeInfo spike, ProfileData profile) {
+		MinecraftServer s = server;
+		LagMonitor monitor = LagMonitor.get();
+		// The mod behind most of the spike, and what its code was doing.
+		String mod = topMod(profile, 15);
+		String modWhat = mod == null ? null : LagReport.label(mod) + ": " + LagReport.modShort(profile, mod);
+		boolean logged = config.logLagSpikeMs > 0 && spike.durationMs() >= config.logLagSpikeMs;
+		if (logged) {
 			PacketDoctor.LOGGER.warn("Lag spike: {}", spike.summary());
+			if (modWhat != null) PacketDoctor.LOGGER.warn("  {}", modWhat);
 		}
 		PacketDoctorEvents.LAG_SPIKE.invoker().onLagSpike(spike);
-		MinecraftServer s = server;
-		if (s != null && config.alertOps && config.alertLagSpikeMs > 0 && spike.durationMs() >= config.alertLagSpikeMs) {
+		boolean alert = s != null && config.alertOps && config.alertLagSpikeMs > 0 && spike.durationMs() >= config.alertLagSpikeMs;
+		java.nio.file.Path file = null;
+		if (s != null && monitor != null && (alert || logged)) {
+			file = autoReport(s, profile, t("packetdoctor.report.lag.spike_what", LagAnalysis.seconds(spike.durationMs()), spike.ticksLost()), "spike",
+					monitor.profile(5), t("packetdoctor.cmd.lag.window", 5));
+			if (file != null) PacketDoctor.LOGGER.warn("  Lag report: {}", file.toAbsolutePath());
+		}
+		if (alert) {
 			String top = spike.causes().isEmpty() ? "" : " - " + LagAnalysis.line(spike.causes().getFirst());
+			if (mod != null) top = " - " + modWhat;
+			MutableComponent hover = Component.literal(spike.summary()).withStyle(ChatFormatting.WHITE);
+			hover.append(findingsHover(LagReport.findings(profile, monitor == null ? null : monitor.census(), s), 3));
+			if (file != null) hover.append(Component.literal("\n\n" + t("packetdoctor.cmd.alert.report_file", file.getFileName())).withStyle(ChatFormatting.DARK_GRAY));
+			hover.append(Component.literal("\n" + t("packetdoctor.cmd.alert.click_spike")).withStyle(ChatFormatting.YELLOW));
 			alertOps(s, Component.literal(t("packetdoctor.cmd.alert.lag", LagAnalysis.seconds(spike.durationMs())) + top)
-					.withStyle(ChatFormatting.YELLOW), Component.literal(spike.summary()), "/packetdoctor lag");
+					.withStyle(ChatFormatting.YELLOW), hover, "/packetdoctor lag spike 1");
+		}
+	}
+
+	/** The biggest mod (not Minecraft or a library) with at least {@code minPercent} of the time, or null. */
+	private static @Nullable String topMod(ProfileData d, double minPercent) {
+		for (Map.Entry<String, Long> e : d.mods.top(10)) {
+			if (e.getKey().equals(PacketDoctor.MOD_ID) || com.packetdoctor.diagnose.ModBlame.isPlatform(e.getKey())) continue;
+			return d.percent(e.getValue()) >= minPercent ? e.getKey() : null;
+		}
+		return null;
+	}
+
+	/** The top findings, for an alert's hover text. */
+	private static Component findingsHover(List<LagReport.Finding> findings, int max) {
+		MutableComponent out = Component.empty();
+		for (int i = 0; i < Math.min(max, findings.size()); i++) {
+			LagReport.Finding f = findings.get(i);
+			out.append(Component.literal("\n\n" + (i + 1) + ". " + f.title()).withStyle(ChatFormatting.GOLD));
+			for (String d : f.details().subList(0, Math.min(5, f.details().size()))) out.append(Component.literal("\n" + d).withStyle(ChatFormatting.GRAY));
+			if (!f.actions().isEmpty()) out.append(Component.literal("\n→ " + f.actions().getFirst()).withStyle(ChatFormatting.GREEN));
+		}
+		return out;
+	}
+
+	private static long lastAutoReport;
+
+	/** Writes a lag report file, at most once per lagReportCooldownMinutes (null if not written). */
+	private static java.nio.file.@Nullable Path autoReport(MinecraftServer s, ProfileData d, String what, String label, @Nullable ProfileData extra,
+															@Nullable String extraWhat) {
+		long now = System.currentTimeMillis();
+		if (!config.autoLagReports || now - lastAutoReport < config.lagReportCooldownMinutes * 60_000L) return null;
+		lastAutoReport = now;
+		try {
+			return LagReport.write(s, d, what, label, extra, extraWhat, config.keepLagReports);
+		} catch (java.io.IOException | RuntimeException e) {
+			PacketDoctor.LOGGER.warn("Couldn't write the lag report", e);
+			return null;
 		}
 	}
 
@@ -280,9 +353,22 @@ public final class PacketDoctorServer {
 					info.msptAverage(), causes);
 			PacketDoctorEvents.SERVER_OVERLOADED.invoker().onPerformanceChange(info);
 			MinecraftServer s = server;
-			if (s != null && config.alertOps) {
-				alertOps(s, Component.literal(t("packetdoctor.cmd.alert.overloaded", info.tps10s()) + causes).withStyle(ChatFormatting.RED),
-						Component.literal(t("packetdoctor.cmd.click_details")), "/packetdoctor lag");
+			LagMonitor monitor = LagMonitor.get();
+			if (s != null && monitor != null) {
+				ProfileData recent = monitor.profile(2);
+				List<LagReport.Finding> findings = LagReport.findings(recent, monitor.census(), s);
+				if (!findings.isEmpty()) PacketDoctor.LOGGER.warn("  Biggest cause: {}", findings.getFirst().title());
+				java.nio.file.Path file = autoReport(s, recent, t("packetdoctor.report.lag.overload_what", info.tps10s()), "overload", null, null);
+				if (file != null) PacketDoctor.LOGGER.warn("  Lag report: {}", file.toAbsolutePath());
+				if (config.alertOps) {
+					MutableComponent hover = Component.literal(t("packetdoctor.cmd.alert.overloaded", info.tps10s())).withStyle(ChatFormatting.WHITE);
+					hover.append(findingsHover(findings, 3));
+					if (file != null) hover.append(Component.literal("\n\n" + t("packetdoctor.cmd.alert.report_file", file.getFileName())).withStyle(ChatFormatting.DARK_GRAY));
+					hover.append(Component.literal("\n" + t("packetdoctor.cmd.click_details")).withStyle(ChatFormatting.YELLOW));
+					String top = findings.isEmpty() ? causes : " - " + findings.getFirst().title();
+					alertOps(s, Component.literal(t("packetdoctor.cmd.alert.overloaded", info.tps10s()) + top).withStyle(ChatFormatting.RED),
+							hover, "/packetdoctor lag");
+				}
 			}
 		} else {
 			PacketDoctor.LOGGER.info("The server is keeping up again: {} TPS", info.tps10s());

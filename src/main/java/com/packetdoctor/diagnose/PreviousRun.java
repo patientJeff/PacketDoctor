@@ -47,6 +47,9 @@ public final class PreviousRun {
 	public record State(long start, boolean cleanStop, String version) {
 	}
 
+	/** Files changed after this run began belong to it, not to the previous run. */
+	private static long thisRunStart = Long.MAX_VALUE;
+
 	private PreviousRun() {
 	}
 
@@ -54,6 +57,7 @@ public final class PreviousRun {
 
 	/** Starts this run's marker and returns the previous run's, if there was one. */
 	public static @Nullable State begin() {
+		thisRunStart = System.currentTimeMillis();
 		State previous = read();
 		write(new State(System.currentTimeMillis(), false, PacketDoctor.version()));
 		return previous;
@@ -262,7 +266,8 @@ public final class PreviousRun {
 		try (Stream<Path> list = Files.list(dir)) {
 			return list.filter(p -> {
 				String n = p.getFileName().toString();
-				return n.startsWith(prefix) && n.endsWith(suffix) && !n.startsWith("debug") && modified(p) >= since;
+				long m = modified(p);
+				return n.startsWith(prefix) && n.endsWith(suffix) && !n.startsWith("debug") && m >= since && m <= thisRunStart;
 			}).max(Comparator.comparingLong(PreviousRun::modified)).orElse(null);
 		} catch (IOException e) {
 			return null;

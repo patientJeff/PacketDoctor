@@ -62,6 +62,16 @@ public final class ConsoleCapture {
 	private volatile int maxLines;
 	private volatile @Nullable LagListener lagListener;
 	private volatile @Nullable StartupListener startupListener;
+	private volatile @Nullable ErrorListener errorListener;
+
+	/** Told about every error, and every warning with an exception, in full. Must not log or throw. */
+	public interface ErrorListener {
+		void onError(long time, String level, String logger, String thread, String message, @Nullable Throwable thrown, @Nullable String mod);
+	}
+
+	public void setErrorListener(@Nullable ErrorListener listener) {
+		this.errorListener = listener;
+	}
 
 	private ConsoleCapture(int maxLines, Consumer<ConsoleProblem> problemListener) {
 		this.maxLines = maxLines;
@@ -166,8 +176,13 @@ public final class ConsoleCapture {
 				}
 			}
 		}
+		boolean ours = logger.equals(PacketDoctor.LOGGER.getName());
+		if (!ours && (level.isMoreSpecificThan(Level.ERROR) || (warnOrWorse && thrown != null))) {
+			ErrorListener e = errorListener;
+			if (e != null) e.onError(event.getTimeMillis(), level.name(), logger, line.thread(), message, thrown, mod);
+		}
 		// Our own lines (lag spike notes, explanations) are not problems in themselves.
-		if (warnOrWorse && !logger.equals(PacketDoctor.LOGGER.getName())) {
+		if (warnOrWorse && !ours) {
 			problems.add(event.getTimeMillis(), level.isMoreSpecificThan(Level.ERROR), shortLogger(logger), message, errorText, mod);
 		}
 	}

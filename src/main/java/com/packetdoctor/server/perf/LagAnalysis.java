@@ -34,14 +34,33 @@ public final class LagAnalysis {
 			"BlockBehaviour", "BaseEntityBlock", "BlockEntity", "BlockStateBase", "EntityType", "Brain", "Leashable", "Targeting",
 			"BlockState", "StateHolder", "FlowingFluid", "Fluid");
 
-	/** What one snapshot of the server thread showed. */
-	public record Sample(LagKind kind, @Nullable String mod, @Nullable String example) {
+	/**
+	 * What one snapshot of the server thread showed.
+	 *
+	 * @param modMethod the mod's code that was running, e.g. "KineticBlockEntity.tick"
+	 * @param via       how that code got run, e.g. "its own block entities" or "a Fabric API callback (ServerTickEvents)"
+	 * @param where     the block entity or entity being ticked, if any
+	 */
+	public record Sample(LagKind kind, @Nullable String mod, @Nullable String example, @Nullable String modMethod, @Nullable String via,
+						 @Nullable Where where) {
+		public Sample(LagKind kind, @Nullable String mod, @Nullable String example) {
+			this(kind, mod, example, null, null, null);
+		}
 	}
 
 	private LagAnalysis() {
 	}
 
 	public static Sample classify(StackTraceElement[] frames, Thread.State state) {
+		return classify(frames, state, null);
+	}
+
+	/**
+	 * @param where the block entity or entity {@link TickContext} says was being ticked; kept
+	 *              only if the stack really is inside that kind of tick
+	 */
+	public static Sample classify(StackTraceElement[] frames, Thread.State state, @Nullable Where where) {
+		if (where != null && !inTickOf(frames, where.entity())) where = null;
 		LagKind kind = null;
 		int kindAt = -1;
 		String example = null;
@@ -71,7 +90,106 @@ public final class LagAnalysis {
 			boolean waiting = state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING || state == Thread.State.BLOCKED;
 			kind = mod != null ? LagKind.MOD : waiting ? LagKind.WAITING : LagKind.OTHER;
 		}
-		return new Sample(kind, mod, example);
+		if (example == null && where != null) example = shortType(where.type());
+		String method = null;
+		String via = null;
+		if (mod != null) {
+			method = describeMethod(frames, modAt);
+			via = via(frames, modAt, mod, where);
+		}
+		return new Sample(kind, mod, example, method, via, where);
+	}
+
+	/** Whether the stack is inside a block entity tick (or an entity tick). */
+	private static boolean inTickOf(StackTraceElement[] frames, boolean entity) {
+		for (StackTraceElement f : frames) {
+			String cls = f.getClassName();
+			if (entity) {
+				if (cls.endsWith("ServerLevel") && (f.getMethodName().equals("tickNonPassenger") || f.getMethodName().equals("tickPassenger"))) return true;
+			} else if (cls.endsWith("LevelChunk$BoundTickingBlockEntity")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static String shortType(String type) {
+		int colon = type.indexOf(':');
+		return colon >= 0 && type.startsWith("minecraft:") ? type.substring(colon + 1) : type;
+	}
+
+	// --- What a mod's code was doing -------------------------------------------------------
+
+	/** Code a mod injected into a Minecraft class: the frame's class isn't the mod's own. */
+	private static boolean isInjected(StackTraceElement f, String mod) {
+		return f.getMethodName().indexOf('$') >= 0 && !mod.equals(ModBlame.modForClass(f.getClassName()));
+	}
+
+	/** "KineticBlockEntity.tick", "tick (lambda) in TrainTicker", or "onTick, added to Minecraft's Villager". */
+	private static String describeMethod(StackTraceElement[] frames, int at) {
+		StackTraceElement f = frames[at];
+		String cls = simpleClass(f.getClassName());
+		String m = f.getMethodName();
+		String mod = ModBlame.modForFrame(f);
+		if (mod != null && isInjected(f, mod)) {
+			String[] parts = m.split("\\$");
+			return Tr.t("packetdoctor.via.method_injected", parts[parts.length - 1], cls);
+		}
+		if (m.startsWith("lambda$")) {
+			String[] parts = m.split("\\$");
+			return cls + "." + (parts.length > 1 ? parts[1] : m) + " (lambda)";
+		}
+		return cls + "." + m;
+	}
+
+	/** How the mod's code got to run, from the frames just outside it. */
+	private static String via(StackTraceElement[] frames, int at, String mod, @Nullable Where where) {
+		if (where != null && where.namespace().equals(mod)) {
+			return Tr.t(where.entity() ? "packetdoctor.via.own_entities" : "packetdoctor.via.own_block_entities");
+		}
+		StackTraceElement f = frames[at];
+		if (isInjected(f, mod)) {
+			String target = simpleClass(f.getClassName());
+			for (int j = at + 1; j < frames.length; j++) {
+				if (frames[j].getClassName().equals(f.getClassName()) && frames[j].getMethodName().indexOf('$') < 0) {
+					target += "." + frames[j].getMethodName();
+					break;
+				}
+			}
+			return Tr.t("packetdoctor.via.injected", target);
+		}
+		for (int j = at + 1; j < frames.length; j++) {
+			StackTraceElement caller = frames[j];
+			String callerMod = ModBlame.modForFrame(caller);
+			if (mod.equals(callerMod)) continue;
+			String cls = caller.getClassName();
+			if (cls.startsWith("net.fabricmc.fabric.")) return Tr.t("packetdoctor.via.fabric", eventName(cls));
+			if ("java".equals(callerMod) || callerMod == null) continue;
+			if ("minecraft".equals(callerMod)) {
+				if (where != null) return Tr.t("packetdoctor.via.during_thing", where.type());
+				return Tr.t("packetdoctor.via.minecraft", simpleClass(cls) + "." + caller.getMethodName());
+			}
+			if (callerMod.equals(PacketDoctor.MOD_ID)) continue;
+			return Tr.t("packetdoctor.via.other_mod", label(callerMod));
+		}
+		return Tr.t("packetdoctor.via.unknown");
+	}
+
+	/** "ServerTickEvents" for net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents$$Lambda/0x... */
+	private static String eventName(String cls) {
+		String s = simpleClass(cls);
+		int inner = s.indexOf('$');
+		if (inner > 0) s = s.substring(0, inner);
+		return s.endsWith("Impl") ? s.substring(0, s.length() - 4) : s;
+	}
+
+	/** "KineticBlockEntity" for com.simibubi.create...KineticBlockEntity, without lambda or hidden-class suffixes. */
+	static String simpleClass(String cls) {
+		int lambda = cls.indexOf("$$Lambda");
+		if (lambda >= 0) cls = cls.substring(0, lambda);
+		int hidden = cls.indexOf('/');
+		if (hidden >= 0) cls = cls.substring(0, hidden);
+		return cls.substring(cls.lastIndexOf('.') + 1);
 	}
 
 	private static @Nullable LagKind kindOf(String cls, String m) {

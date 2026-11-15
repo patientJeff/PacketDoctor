@@ -11,6 +11,9 @@
 		"ServerLoginPacketListenerImplMixin"
 	],
 	"server": [
+		"BoundTickingBlockEntityMixin",
+		"LevelTickersAccessor",
+		"ServerLevelMixin",
 		"ServerWatchdogMixin"
 	],
 	"client": [

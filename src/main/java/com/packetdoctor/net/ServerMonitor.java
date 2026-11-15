@@ -23,6 +23,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.contents.TranslatableContents;
 import net.minecraft.network.protocol.BundlePacket;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
+import net.minecraft.network.protocol.common.custom.BrandPayload;
 import net.minecraft.network.SkipPacketException;
 import net.minecraft.server.network.ServerCommonPacketListenerImpl;
 import net.minecraft.server.network.ServerConfigurationPacketListenerImpl;
@@ -190,6 +192,10 @@ public final class ServerMonitor implements ConnectionObserver {
 	@Override
 	public void onInbound(Connection connection, Packet<?> packet) {
 		Integer size = decodedSizes.remove(packet);
+		if (packet instanceof ServerboundCustomPayloadPacket custom && custom.payload() instanceof BrandPayload brand) {
+			PlayerSession s = session(connection);
+			if (s != null) s.brand = brand.brand().length() > 64 ? brand.brand().substring(0, 64) : brand.brand();
+		}
 		if (!monitoring()) return;
 		PlayerSession s = session(connection);
 		if (s == null) return;
@@ -472,6 +478,8 @@ public final class ServerMonitor implements ConnectionObserver {
 		private volatile long errorTime;
 		private volatile @Nullable Kick kick;
 		private volatile boolean explanationSent;
+		/** The game's own name for itself ("vanilla", "fabric", "lunarclient:..."), as it told the server. */
+		public volatile @Nullable String brand;
 		private double lastX = Double.NaN;
 		private double lastY;
 		private double lastZ;
@@ -504,6 +512,16 @@ public final class ServerMonitor implements ConnectionObserver {
 			} catch (RuntimeException ignored) {
 			}
 			return false;
+		}
+
+		/** The packet types this player sent most in the last {@code seconds}, e.g. "movement x240, arm swing x80". */
+		public String busiestFromPlayer(int seconds) {
+			return fromPlayer.topTypes(seconds, 4, System.currentTimeMillis());
+		}
+
+		/** The packet types the server sent this player most in the last {@code seconds}. */
+		public String busiestToPlayer(int seconds) {
+			return toPlayer.topTypes(seconds, 4, System.currentTimeMillis());
 		}
 
 		public PlayerReport report() {

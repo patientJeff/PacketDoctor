@@ -10,10 +10,15 @@ import com.packetdoctor.api.PerformanceInfo;
 import com.packetdoctor.diagnose.Reports;
 import com.packetdoctor.server.ServerConfig;
 import com.packetdoctor.server.console.ConsoleCapture;
+import com.packetdoctor.mixin.LevelTickersAccessor;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import org.jspecify.annotations.Nullable;
 
 import java.io.IOException;
@@ -53,7 +58,8 @@ public final class LagMonitor {
 
 	/** Receives what the monitor finds, on the server thread. */
 	public interface Listener {
-		void onSpike(LagSpikeInfo spike);
+		/** A lag spike ended; {@code profile} has its samples added up in detail. */
+		void onSpike(LagSpikeInfo spike, ProfileData profile);
 
 		void onOverloaded(PerformanceInfo info);
 
@@ -64,8 +70,23 @@ public final class LagMonitor {
 	public record StuckTick(long since, long elapsedMs, List<LagCause> causes, List<String> frames) {
 	}
 
-	private record Context(long time, int loadedChunks, int entities, List<String> topEntities, int players) {
+	private record Context(long time, int loadedChunks, int entities, List<String> topEntities, int players, Census census) {
 	}
+
+	/**
+	 * How many of each block entity (that ticks) and entity type are loaded, counted every
+	 * five seconds, keyed like {@link Where#thingKey()} ("B minecraft:hopper").
+	 */
+	public record Census(long time, Map<String, Integer> things, int loadedChunks, int entities, int tickingBlockEntities) {
+		public int count(String thingKey) {
+			return things.getOrDefault(thingKey, 0);
+		}
+	}
+
+	/** Minute buckets of the always-on profile, newest last. */
+	private final Deque<ProfileData> minutes = new ArrayDeque<>();
+	private long currentMinute = -1;
+	private int backgroundLoops;
 
 	private final Supplier<ServerConfig> config;
 	private final Listener listener;
@@ -145,10 +166,14 @@ public final class LagMonitor {
 			tickCount = 0;
 			spikes.clear();
 			secondSamples.clear();
+			minutes.clear();
+			spikeProfiles.clear();
+			currentMinute = -1;
 		}
 		open = null;
 		overloaded = false;
 		running = true;
+		TickContext.enabled = true;
 		Thread t = new Thread(this::sampleLoop, "Packet Doctor lag sampler");
 		t.setDaemon(true);
 		t.setPriority(Thread.MAX_PRIORITY);
@@ -158,6 +183,9 @@ public final class LagMonitor {
 
 	public void stop() {
 		running = false;
+		TickContext.enabled = false;
+		TickContext.blockEntity = null;
+		TickContext.entity = null;
 		tickStartNanos = 0;
 		busyStartNanos = 0;
 		taskStartNanos = 0;
@@ -244,6 +272,9 @@ public final class LagMonitor {
 			tickCount = Math.min(tickCount + 1, HISTORY);
 			samples = tickSamples.isEmpty() ? List.of() : new ArrayList<>(tickSamples);
 			tickSamples.clear();
+			ProfileData minute = bucket(now);
+			minute.ticks++;
+			minute.tickNanos += durationNs;
 			// Only ticks that really ran over count towards "what slow ticks were spent on".
 			if (durationMs > budgetMs && !samples.isEmpty()) {
 				long second = now / 1000;
@@ -302,11 +333,53 @@ public final class LagMonitor {
 		Context ctx = context;
 		LagSpikeInfo info = new LagSpikeInfo(s.start, s.durationMs, ticksLost, s.ticks, summary, causes, List.copyOf(console),
 				ctx == null ? List.of() : ctx.topEntities());
+		ProfileData profile = ProfileData.of(s.samples, s.durationMs, s.ticks);
 		synchronized (lock) {
 			spikes.addFirst(info);
 			while (spikes.size() > 50) spikes.removeLast();
+			spikeProfiles.addFirst(profile);
+			while (spikeProfiles.size() > 50) spikeProfiles.removeLast();
 		}
-		listener.onSpike(info);
+		listener.onSpike(info, profile);
+	}
+
+	private final Deque<ProfileData> spikeProfiles = new ArrayDeque<>();
+
+	/** The detailed samples of a recent spike: 0 is the newest. */
+	public @Nullable ProfileData spikeProfile(int index) {
+		synchronized (lock) {
+			int i = 0;
+			for (ProfileData p : spikeProfiles) if (i++ == index) return p;
+			return null;
+		}
+	}
+
+	/** The minute bucket for {@code nowMs}, starting a new one when the minute changed. Caller holds the lock. */
+	private ProfileData bucket(long nowMs) {
+		long minute = nowMs / 60_000;
+		if (minute != currentMinute || minutes.isEmpty()) {
+			currentMinute = minute;
+			minutes.addLast(new ProfileData());
+			while (minutes.size() > 61) minutes.removeFirst();
+		}
+		return minutes.getLast();
+	}
+
+	/** The always-on profile of the last {@code count} minutes (the current, unfinished minute included). */
+	public ProfileData profile(int count) {
+		ProfileData out = new ProfileData();
+		synchronized (lock) {
+			int skip = Math.max(0, minutes.size() - Math.max(1, count));
+			int i = 0;
+			for (ProfileData m : minutes) if (i++ >= skip) out.merge(m);
+		}
+		return out;
+	}
+
+	/** Loaded block entities and entities by type, as last counted (null before the first count). */
+	public @Nullable Census census() {
+		Context c = context;
+		return c == null ? null : c.census();
 	}
 
 	/** Records "Can't keep up!" from the console, which has the server's own count of ticks behind. */
@@ -339,17 +412,31 @@ public final class LagMonitor {
 	private void updateContext(MinecraftServer server) {
 		int chunks = 0;
 		int entities = 0;
+		int tickers = 0;
 		Map<String, Integer> byType = new HashMap<>();
+		Map<String, Integer> things = new HashMap<>();
 		for (ServerLevel level : server.getAllLevels()) {
 			chunks += level.getChunkSource().getLoadedChunksCount();
 			for (Entity e : level.getAllEntities()) {
 				entities++;
-				byType.merge(EntityType.getKey(e.getType()).toString(), 1, Integer::sum);
+				String type = EntityType.getKey(e.getType()).toString();
+				byType.merge(type, 1, Integer::sum);
+				things.merge("E " + type, 1, Integer::sum);
+			}
+			try {
+				for (TickingBlockEntity t : ((LevelTickersAccessor) level).packetdoctor$blockEntityTickers()) {
+					if (t.isRemoved()) continue;
+					tickers++;
+					things.merge("B " + t.getType(), 1, Integer::sum);
+				}
+			} catch (RuntimeException | LinkageError ignored) {
+				// Another mod replaced the list, or the hook isn't applied: counts just go without block entities.
 			}
 		}
 		List<String> top = byType.entrySet().stream().sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).limit(5)
 				.map(e -> e.getKey() + " x" + e.getValue()).toList();
-		context = new Context(System.currentTimeMillis(), chunks, entities, top, server.getPlayerCount());
+		long now = System.currentTimeMillis();
+		context = new Context(now, chunks, entities, top, server.getPlayerCount(), new Census(now, Map.copyOf(things), chunks, entities, tickers));
 	}
 
 	// --- The sampler thread ----------------------------------------------------------------
@@ -369,24 +456,77 @@ public final class LagMonitor {
 		}
 	}
 
+	/**
+	 * Slow ticks are sampled every interval. Normal ticks are sampled now and then too
+	 * (every {@code profileIntervalMs} of busy time), for the always-on profile that shows
+	 * what the server spends its time on even when it keeps up.
+	 */
 	private void sampleOnce() {
 		long start = busyStartNanos;
 		Thread thread = serverThread;
-		if (start == 0 || thread == null || !config.get().lagMonitor) return;
+		ServerConfig cfg = config.get();
+		if (start == 0 || thread == null || !cfg.lagMonitor) return;
 		long elapsed = System.nanoTime() - start;
-		if (elapsed < SAMPLE_AFTER_NS) return;
+		boolean slow = elapsed >= SAMPLE_AFTER_NS;
+		int interval = Math.max(1, cfg.lagSampleIntervalMs);
+		int every = Math.max(interval, cfg.profileIntervalMs);
+		long weight;
+		if (slow) {
+			weight = interval;
+			backgroundLoops = 0;
+		} else {
+			if (!cfg.profileServer || ++backgroundLoops * interval < every) return;
+			backgroundLoops = 0;
+			weight = every;
+		}
 
+		BlockEntity be = TickContext.blockEntity;
+		Entity entity = TickContext.entity;
 		StackTraceElement[] stack = thread.getStackTrace();
 		Thread.State state = thread.getState();
 		if (busyStartNanos != start) return; // that work ended while we looked
-		LagAnalysis.Sample sample = LagAnalysis.classify(stack, state);
+		// Only trust what was being ticked if it is still the same thing, or at least the same
+		// type (quick block entities like hoppers are done before the stack is taken; the next
+		// one ticked is the same kind in the same build, as they tick chunk by chunk).
+		BlockEntity beAfter = TickContext.blockEntity;
+		if (beAfter != be) be = be != null && beAfter != null && beAfter.getType() == be.getType() ? beAfter : null;
+		Entity entityAfter = TickContext.entity;
+		if (entityAfter != entity) entity = entity != null && entityAfter != null && entityAfter.getType() == entity.getType() ? entityAfter : null;
+		Where where = be != null ? where(be) : entity != null ? where(entity) : null;
+		LagAnalysis.Sample sample = LagAnalysis.classify(stack, state, where);
 
 		List<LagAnalysis.Sample> copy = null;
+		long now = System.currentTimeMillis();
 		synchronized (lock) {
-			if (tickSamples.size() < 100_000) tickSamples.add(sample);
-			if (elapsed > 5_000 * MS && System.currentTimeMillis() - stuckWrittenAt > 5000) copy = new ArrayList<>(tickSamples);
+			if (slow && tickSamples.size() < 100_000) tickSamples.add(sample);
+			bucket(now).add(sample, weight);
+			if (slow && elapsed > 5_000 * MS && now - stuckWrittenAt > 5000) copy = new ArrayList<>(tickSamples);
 		}
 		if (copy != null) writeStuck(elapsed / MS, copy, stack);
+	}
+
+	private static @Nullable Where where(BlockEntity be) {
+		try {
+			Level level = be.getLevel();
+			if (level == null) return null;
+			BlockPos p = be.getBlockPos();
+			String dim = level.dimension().identifier().toString();
+			return new Where(false, be.typeHolder().getRegisteredName(), dim, p.getX(), p.getY(), p.getZ(), null,
+					PlayerSpots.nearest(dim, p.getX(), p.getZ()));
+		} catch (RuntimeException e) {
+			return null;
+		}
+	}
+
+	private static @Nullable Where where(Entity e) {
+		try {
+			BlockPos p = e.blockPosition();
+			String dim = e.level().dimension().identifier().toString();
+			return new Where(true, EntityType.getKey(e.getType()).toString(), dim, p.getX(), p.getY(), p.getZ(), e.getUUID().toString(),
+					PlayerSpots.nearest(dim, p.getX(), p.getZ()));
+		} catch (RuntimeException ex) {
+			return null;
+		}
 	}
 
 	/** The server has been on one tick for seconds: save what it is doing, in case it never finishes. */

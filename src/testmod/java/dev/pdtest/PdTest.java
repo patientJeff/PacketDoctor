@@ -1,5 +1,6 @@
 package dev.pdtest;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.packetdoctor.api.ConsoleProblem;
 import com.packetdoctor.api.CrashInfo;
@@ -34,6 +35,12 @@ public final class PdTest implements ModInitializer {
 				crashNextTick = false;
 				throw new IllegalStateException("Packet Doctor test: a crash in a server tick");
 			}
+			if (lagMs > 0) simulateHeavyWork(lagMs);
+			int spike = spikeMs;
+			if (spike > 0) {
+				spikeMs = 0;
+				simulateHeavyWork(spike);
+			}
 		});
 		PacketDoctorEvents.LAG_SPIKE.register(spike -> LOG.info("API event LAG_SPIKE: {} ms, {} cause(s)", spike.durationMs(), spike.causes().size()));
 		PacketDoctorEvents.SERVER_OVERLOADED.register(p -> LOG.info("API event SERVER_OVERLOADED: {} TPS", p.tps10s()));
@@ -57,7 +64,27 @@ public final class PdTest implements ModInitializer {
 							"testing the API kick");
 					return 1;
 				})))
-				.then(Commands.literal("api").executes(PdTest::api))));
+				.then(Commands.literal("api").executes(PdTest::api))
+				.then(Commands.literal("lag").then(Commands.argument("ms", IntegerArgumentType.integer(0, 500)).executes(c -> {
+					lagMs = IntegerArgumentType.getInteger(c, "ms");
+					return 1;
+				})))
+				.then(Commands.literal("spike").then(Commands.argument("ms", IntegerArgumentType.integer(1, 30_000)).executes(c -> {
+					spikeMs = IntegerArgumentType.getInteger(c, "ms");
+					return 1;
+				})))));
+	}
+
+	/** Lag for testing: {@code /pdtest lag <ms>} every tick, {@code /pdtest spike <ms>} once. */
+	private static volatile int lagMs;
+	private static volatile int spikeMs;
+	private static volatile double sink;
+
+	private static void simulateHeavyWork(int ms) {
+		long end = System.nanoTime() + ms * 1_000_000L;
+		double x = 0;
+		while (System.nanoTime() < end) x += Math.sqrt(x + 1);
+		sink = x;
 	}
 
 	private static int api(CommandContext<CommandSourceStack> c) {

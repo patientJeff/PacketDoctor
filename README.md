@@ -50,21 +50,48 @@ Put the same jar in the server's `mods` folder (Fabric API is required).
 
 Each explanation is printed in the console and saved in `packetdoctor/reports`. Players online at the time are told the server crashed, and why.
 
+**Every error file is kept.** Packet Doctor keeps a copy of every file a server error leaves behind in `packetdoctor/errors`. It never deletes anything there itself:
+
+- `console/errors-<date>.log`: every console error, and every warning that came with an exception, with the full stack trace and the mod it came from. It is written as each error happens, so it survives a crash straight after.
+- `incidents/<time>-<cause>/`: one folder per crash, watchdog freeze, start-up failure or unexpected stop. It holds the explanation, Minecraft's crash report, the server log at the time (`latest-at-crash.log.gz`) and the mod list with Java and system details. On the next start the folder also gets the finished log of that run and any files that appeared after the crash, such as Java's `hs_err_pid*.log`.
+
 **Lag (TPS drops).** Every tick is timed. While a tick runs slow, Packet Doctor samples what the server is doing and sorts it into plain causes: entities, mob AI, pathfinding, hoppers, redstone, block updates, chunk loading, world generation, saving, commands, a specific mod, Java garbage collection, and more, with examples like the mob types involved. Lag spikes are written to the console with their cause; long ones and sustained overload also alert operators in chat.
+
+**The biggest causes of lag, and what to do.** Packet Doctor also samples normal ticks now and then (`profileServer`), so it always knows what the server spends its time on, even while it keeps up. Each sample notes which block entity or entity was being ticked, where it was, and the nearest player. `/packetdoctor lag` ranks the biggest causes of the last 5 minutes. Each one shows its share of the server's time and its cost in milliseconds per tick, plus the best thing to do. Hover over a cause for the details; click to teleport there or see more. The causes come in four views, and the same time can show up in more than one:
+
+- **Mods:** time spent in each mod's code. It also covers **what that code is doing** (the mod's own classes and methods, by share), **how it gets run** (its own block entities or entities, code it added to a Minecraft class, a Fabric callback such as `ServerTickEvents`, or another mod), what the server was doing at the time, and where. The advice depends on which of these it is.
+- **Places:** the busiest chunks, what in them takes the time, what's there right now, and the nearest player. The advice is specific to what is there.
+- **Block entities and entities:** cost by type, with how many are loaded and the cost of each one. There's specific advice for hoppers, villagers, dropped items, mob farms, minecart pile-ups, TNT, falling-block dupers, pistons, sculk and more, and generic advice for modded machines and mobs.
+- **Kinds of work:** like above, with what's most involved and where. For terrain generation and chunk loading it also names the players exploring the most.
+
+**Lag report files.** `/packetdoctor lag report` writes everything to `packetdoctor/lag/lag-<time>-report.txt`: all the causes with what to do, every mod's methods in full, time by kind of work, types with loaded counts, the busiest chunks and single block entities or entities (with teleport commands), lag near each player, and loaded counts. A report is also written automatically when a lag spike is logged or the server becomes overloaded (`autoLagReports`, at most once per `lagReportCooldownMinutes`). Lag alerts in chat say what the mod's code was doing and list the biggest causes when you hover over them. Click one to see that spike in detail. Send a mod's section of a report to its author: it names exactly which of its code ran.
 
 **Console problems.** Warnings and errors are grouped (the same error printed 500 times is one entry) and explained: damaged chunks, failed saves, out of memory, mod compatibility (mixin) warnings, data pack errors, missing mod content, ports in use, offline mode, and more, with the mod they came from.
 
-**Players' connections.** Every player's packets get the same checks as the player's own game, worded for admins, with recent disconnects and who caused them.
+**Players.** Every player's packets get the same checks as the player's own game, worded for admins, with recent disconnects and who caused them. `/packetdoctor players` lists everyone online with their ping, the share of lag near them, where they are, whether they're exploring new land, and their warnings, sorted with the most lag nearby first. `/packetdoctor player <name>` adds:
+
+- **Connection and game:** ping, client brand (vanilla, Fabric, Lunar...), view distance, language, the client mods that talk to the server (from their network channels; purely visual mods can't be seen), and the packet types sent and received most.
+- **In the world:** position (click to teleport) and game mode. Also their speed, whether they're flying with an elytra, and how many new chunks they explored in the last 5 minutes and this session.
+- **Around them:** entities and working block entities within 128 blocks, by type, and the share of the server's time spent near them, by type.
+- **Time:** time online this session and in total.
 
 ### Commands (operators)
 
 | Command | Shows |
 |---|---|
 | `/packetdoctor` | Everyone online: packet rates, warnings, and who has Packet Doctor |
-| `/packetdoctor lag` | TPS, milliseconds per tick, what slow ticks are spent on, and recent lag spikes |
+| `/packetdoctor lag` | TPS, milliseconds per tick, what slow ticks are spent on, the biggest causes with what to do, and recent lag spikes |
+| `/packetdoctor lag top [minutes]` | Every cause, ranked, with what to do (default: last 5 minutes, up to 60) |
+| `/packetdoctor lag mods [minutes]` | Time in each mod's code, and what it's mostly doing |
+| `/packetdoctor lag mod <id> [minutes]` | One mod in detail: its methods, how they get run, what for, where, and what to do |
+| `/packetdoctor lag places [minutes]` | The busiest chunks, with the nearest player and a teleport |
+| `/packetdoctor lag things [minutes]` | Block entity and entity types by cost |
+| `/packetdoctor lag spike <number>` | One recent lag spike in detail (1 = newest) |
+| `/packetdoctor lag report [minutes]` | Writes a full lag report to `packetdoctor/lag` |
+| `/packetdoctor players` | Everyone online: ping, lag near them, where they are, exploring |
 | `/packetdoctor console [clear]` | Console warnings and errors, grouped and explained (hover for advice) |
 | `/packetdoctor crash` | The last crash or unexpected stop, explained |
-| `/packetdoctor player <name>` | One player's traffic and warnings |
+| `/packetdoctor player <name>` | One player's connection, client, position, movement, surroundings, lag near them, traffic and warnings |
 | `/packetdoctor disconnects [count]` | Recent disconnects and why |
 | `/packetdoctor export <name>` | Saves a player's packet log to `packetdoctor/reports` |
 | `/packetdoctor clear <name>` | Clears a player's warnings |
@@ -79,10 +106,17 @@ Each explanation is printed in the console and saved in `packetdoctor/reports`. 
 | `lagMonitor` | `true` | Time ticks and find what slow ones are spent on |
 | `lagSpikeMs` | `300` | A tick at least this slow counts as a lag spike |
 | `lagSampleIntervalMs` | `10` | How often a slow tick is sampled |
+| `profileServer` | `true` | Also sample normal ticks, so the biggest causes are known even while the server keeps up |
+| `profileIntervalMs` | `20` | How often a normal tick is sampled (milliseconds of server work) |
+| `autoLagReports` | `true` | Write a report to `packetdoctor/lag` when a lag spike is logged or the server becomes overloaded |
+| `lagReportCooldownMinutes` | `10` | Least minutes between automatic lag reports |
+| `keepLagReports` | `200` | Lag report files kept |
 | `logLagSpikeMs` | `1000` | Spikes at least this long are written to the console (0 = never) |
 | `alertLagSpikeMs` | `2000` | Spikes at least this long alert operators (0 = never) |
 | `captureConsole` | `true` | Read the console to explain errors, crashes and lag |
 | `consoleLines` | `1000` | Console lines remembered |
+| `keepErrorFiles` | `true` | Keep every error's files in `packetdoctor/errors` (never deleted automatically) |
+| `errorLogMaxMbPerDay` | `50` | Most MB of console errors kept per day, so an error repeating in a loop can't fill the disk |
 | `alertOps` | `true` | Chat alerts for operators |
 | `alertMinSeverity` | `DANGER` | Lowest player warning level that alerts: `INFO`, `WARNING` or `DANGER` |
 | `alertCooldownSeconds` | `60` | How soon the same alert can repeat |
